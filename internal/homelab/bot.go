@@ -402,9 +402,9 @@ func (b *bot) requests(ctx context.Context, args []string) {
 	case args[0] == "on":
 		dur := DefaultRequestWindow
 		if len(args) > 1 {
-			v, err := time.ParseDuration(args[1])
+			v, err := ParseDuration(args[1])
 			if err != nil || v <= 0 || v > 7*24*time.Hour {
-				b.send(ctx, "Usage: <code>/requests on 30m</code> (up to 168h)", nil)
+				b.send(ctx, "Usage: <code>/requests on 30m</code> (up to 7d)", nil)
 				return
 			}
 			dur = v

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +57,7 @@ Homelab administration:
   catflap notify add telegram|ntfy|pushover|command
                                        security alerts on your phone; Telegram adds
                                        the invite bot (/invite, /list, /remove)
+                                       (command: catflap notify add command -- CMD ARGS)
   catflap notify list | remove <name> | test [name]
 
 Client:
@@ -102,6 +104,10 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	cmd, args := args[0], args[1:]
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") && !slices.Contains([]string{"invite", "invites", "enroll", "uninstall", "requests"}, cmd) {
+		fmt.Print(usage)
+		return nil
+	}
 	switch cmd {
 	case "help", "-h", "--help":
 		fmt.Print(usage)
@@ -197,6 +203,31 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet("catflap "+name, flag.ContinueOnError)
 	return fs
+}
+
+// durationVar is fs.Duration that also takes whole days ("7d").
+func durationVar(fs *flag.FlagSet, name string, def time.Duration, usage string) *time.Duration {
+	d := def
+	fs.Var(durationFlag{&d}, name, usage)
+	return &d
+}
+
+type durationFlag struct{ d *time.Duration }
+
+func (f durationFlag) String() string {
+	if f.d == nil {
+		return ""
+	}
+	return f.d.String()
+}
+
+func (f durationFlag) Set(s string) error {
+	d, err := homelab.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	*f.d = d
+	return nil
 }
 
 // ---- setup ----
@@ -323,7 +354,7 @@ func cmdRelay(ctx context.Context, args []string) error {
 	}
 	fs := newFlags("relay " + args[0])
 	cfgPath := fs.String("config", relay.DefaultConfigPath, "relay config file")
-	ttl := fs.Duration("ttl", time.Hour, "join code lifetime (join-code)")
+	ttl := durationVar(fs, "ttl", time.Hour, "join code lifetime, a `duration` like 1h or 2d (join-code)")
 	yes := fs.Bool("yes", false, "don't ask for confirmation (remove)")
 	pos, err := parse(fs, args[1:])
 	if err != nil {
@@ -541,7 +572,7 @@ func startHint() string {
 
 func cmdInvite(ctx context.Context, args []string) error {
 	fs := newFlags("invite")
-	ttl := fs.Duration("ttl", 15*time.Minute, "how long the invite stays valid (max 2160h)")
+	ttl := durationVar(fs, "ttl", 15*time.Minute, "how long the invite stays valid, a `duration` like 2h or 7d (max 90d)")
 	replace := fs.Bool("replace", false, "re-enroll an existing device: its old entry and SSH key are replaced")
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -859,7 +890,7 @@ func cmdStatus(ctx context.Context) error {
 func cmdHomelabMove(ctx context.Context, args []string) error {
 	fs := newFlags("homelab move")
 	join := fs.String("join", "", "join code from the new relay (sudo catflap relay join-code there)")
-	ttl := fs.Duration("ttl", 24*time.Hour, "how long the re-enroll invites stay valid")
+	ttl := durationVar(fs, "ttl", 24*time.Hour, "how long the re-enroll invites stay valid, a `duration` like 3d")
 	yes := fs.Bool("yes", false, "don't ask for confirmation")
 	if _, err := parse(fs, args); err != nil {
 		return err
@@ -931,7 +962,7 @@ func humanDuration(d time.Duration) string {
 // cmdRequests shows or opens/closes the enrollment request window.
 func cmdRequests(ctx context.Context, args []string) error {
 	fs := newFlags("requests")
-	dur := fs.Duration("for", homelab.DefaultRequestWindow, "how long the window stays open (on)")
+	dur := durationVar(fs, "for", homelab.DefaultRequestWindow, "how long the window stays open (on), a `duration` like 30m or 1d (max 7d)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err

@@ -62,7 +62,7 @@ release:
     The scripts check the download against `checksums.txt`. Every file also has a signed build
     attestation: `gh attestation verify <file> --repo PaddeK/catflap`.
     Running services keep the old version until restarted; see
-    [upgrading](https://github.com/PaddeK/catflap/blob/main/docs/releasing.md#upgrade-a-running-setup).
+    [upgrading](https://github.com/PaddeK/catflap/blob/main/docs/using-catflap.md#upgrading).
   extra_files:
     - glob: install.sh
     - glob: install.ps1

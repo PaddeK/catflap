@@ -20,7 +20,7 @@ Non-goals: a GUI, multiple relays per homelab, running the relay anywhere but Li
 
 | Term | Meaning |
 |---|---|
-| **relay** | catflap on a VPS with a public address: a DERP relay, a STUN server and catflap's HTTP API, all on port 443 (STUN on 3478/udp) |
+| **relay** | catflap on a VPS with a public address: a DERP relay and catflap's HTTP API on 443/tcp, a STUN server on 3478/udp |
 | **homelab** | catflap on the machine you want to reach: a tailcat server that accepts only enrolled devices and forwards chosen ports to local services |
 | **client** | catflap on a device you connect from: enrolls once, then tunnels `ssh` and port forwards to the homelab |
 | **tailcat** | Tailscale's Go library for a WireGuard tunnel between a client and a server, without Tailscale's coordination server. catflap embeds it on the homelab and clients. |
@@ -125,10 +125,13 @@ homelab$ catflap invite office-laptop           # default: valid 15 min, one use
 laptop$  catflap enroll cfi1-<id>-<secret>@relay.example.com
 ```
 
+`catflap invite` creates the invite on the homelab and registers only its id and expiry with the
+relay (`POST /v1/agent/invites`; `invites --revoke` calls `DELETE /v1/agent/invites/{invite}`).
+
 Crypto (all keys from the invite's 128-bit `secret` via HKDF-SHA256, salt `catflap-invite-v1`):
 - `mac_key = HKDF(secret, info="mac")`, `seal_key = HKDF(secret, info="seal")`
-- The client sends `POST /v1/enroll {invite_id, nodekey, sshkey, hostname, nonce, mac}` where
-  `mac = HMAC-SHA256(mac_key, "catflap-enroll-v1\n" + invite_id + "\n" + nodekey + "\n" + sshkey + "\n" + hostname + "\n" + nonce)`.
+- The client sends `POST /v1/enroll {invite_id, nodekey, ssh_key, hostname, nonce, mac}` where
+  `mac = HMAC-SHA256(mac_key, "catflap-enroll-v1\n" + invite_id + "\n" + nodekey + "\n" + ssh_key + "\n" + hostname + "\n" + nonce)`.
 - The relay **does not know the secret**. It only checks that `invite_id` was registered by a
   homelab and is still open, then queues the submission (max 5 per invite).
 - The homelab picks up the submission (long poll on `GET /v1/agent/events`), verifies the MAC,
@@ -241,9 +244,10 @@ pairing code and approves.
      `boxkey` is a fresh X25519 key. The relay answers with an id and the homelab's node key as
      it knows it.
   2. Homelab (event `new`): validates (name free, keys well-formed), answers with a random
-     32-byte nonce.
-  3. Device: fetches the nonce, then reveals its secret (`POST /v1/request/{id}/reveal`; the
-     relay and the homelab check it against the commit).
+     32-byte nonce (`POST /v1/agent/request`; all of the homelab's answers use this route).
+  3. Device: fetches the nonce (it polls `GET /v1/request/{id}` throughout), then reveals its
+     secret (`POST /v1/request/{id}/reveal`; the relay and the homelab check it against the
+     commit).
   4. Both compute the **pairing code**: SHA-256 over length-prefixed fields (homelab key, homelab
      name, device name, node key, box key, SSH key, hostname), the secret and the nonce, reduced
      to 6 digits. The device prints it; the homelab shows it in Telegram (with Approve/Deny) and
@@ -291,7 +295,8 @@ from the relay's side, for homelabs that are gone.
 - Port 443: TLS (Let's Encrypt via autocert, TLS-ALPN-01 or HTTP-01; or a manual cert). Routes:
   - `/derp` (+ WebSocket), `/derp/probe`, `/derp/latency-check`, `/generate_204` (as upstream's
     DERP server)
-  - `/v1/enroll…`, `/v1/request…` (public, rate-limited), `/v1/agent/…` (homelab token)
+  - `/v1/enroll…`, `/v1/request…` (public, rate-limited), `/v1/agent/join` (public, needs a
+    join code, rate-limited), the rest of `/v1/agent/…` (homelab token)
   - `/` blank page
 - Port 80 (optional): ACME HTTP-01 + redirect. UDP 3478 (optional): STUN.
 - **Relay administration** (`relay join-code`, `status`, `remove`) goes through a local
@@ -312,8 +317,9 @@ from the relay's side, for homelabs that are gone.
   certificates aren't backed up; the new server gets its own. After any outage, the homelab
   re-sends its device list and open invites, so a relay restored from a slightly older backup
   catches up by itself.
-- Limits: 64 KB request bodies, per-IP rate limit on `/v1/enroll`, max 5 submissions per invite,
-  max 50 open invites per homelab, homelab long poll ≤ 25 s.
+- Limits: 64 KB request bodies; per IP, 10 enrollments and 10 joins per 10 minutes and 10
+  requests per hour; max 5 submissions per invite, max 50 open invites per homelab, homelab long
+  poll ≤ 25 s.
 
 ### Homelab (`catflap homelab run`)
 
@@ -335,11 +341,15 @@ from the relay's side, for homelabs that are gone.
     devices can reach any forward; the homelab connects to the target as itself.
 - Relay loop: long-polls the relay for events (enrollments, requests), verifies, admits, and
   re-sends the device list when a sync is pending.
-- Control socket (`control.sock` in the state directory, mode 600) for `invite`, `invites`,
-  `list`, `remove`, `forward`, `notify`, `status`. The daemon is the only writer of its state.
+- Control socket (`control.sock` in the state directory, mode 600) for every homelab command
+  (`invite`, `invites`, `list`, `remove`, `forward`, `notify`, `requests`, `approve`, `deny`,
+  `status`) and for the service code (`/shutdown`, `/uninstall/keys`). The daemon is the only
+  writer of its state.
 - Notifications and the Telegram bot run inside the daemon (see
   [above](#notifications-and-the-telegram-invite-bot)).
-- Files: `~/.config/catflap/homelab.json` (settings: relay, forwards),
+- Files: `~/.config/catflap/homelab.json` (settings: relay, name, forwards, ssh user,
+  authorized_keys file, LAN restriction; see the
+  [user guide](using-catflap.md#homelab-settings-file)),
   `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, homelab token, devices,
   invites), `~/.local/state/catflap/notify.json` (600: notification channels and their tokens).
   Windows: all of them in `%LOCALAPPDATA%\catflap\`.
@@ -376,8 +386,8 @@ from the relay's side, for homelabs that are gone.
     waits), then `/shutdown`; the restart completes even if it cuts the ssh session that asked.
   - `uninstall` asks the running daemon to remove the device keys (`POST /uninstall/keys`), since
     it may have rights the command doesn't.
-  - The ssh user is the account name without the computer name (`DOMAIN\user` becomes
-    `user@domain`).
+  - The ssh user: a local account `COMPUTER\user` becomes `user`; a domain account
+    `DOMAIN\user` becomes `user@domain`.
 
 ### Client
 

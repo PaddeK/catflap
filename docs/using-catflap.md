@@ -9,6 +9,7 @@ words are explained [at the end of Getting started](getting-started.md#words-use
 - [Alerts on your phone and the Telegram bot](#alerts-on-your-phone-and-the-telegram-bot)
 - [Approve a new device from your phone (no invite)](#approve-a-new-device-from-your-phone-no-invite)
 - [Several homelabs](#several-homelabs)
+- [Homelab settings file](#homelab-settings-file)
 - [Upgrading](#upgrading)
 - [What to back up](#what-to-back-up)
 - [Moving the relay to another server](#moving-the-relay-to-another-server)
@@ -28,14 +29,17 @@ words are explained [at the end of Getting started](getting-started.md#words-use
 | forget a homelab (*client*) | `catflap forget ALIAS` (the alias you `ssh` to, by default the homelab's name) |
 | what's set up here (*any*) | `catflap status` |
 
-**Removing a device takes effect immediately:** it's disconnected, its SSH key is removed from
-`authorized_keys`, and the relay stops admitting it. No restarts. `catflap forget` on a client
-only removes the local entry; the homelab still lists the device until you remove it there.
+**Removing a device takes effect immediately:** it's disconnected, the SSH key catflap added for
+it is removed from `authorized_keys`, and the relay stops admitting it. No restarts. If that key
+was in `authorized_keys` before (you added it yourself), it stays, and `catflap remove` says so.
+`catflap forget` on a client only removes the local entry; the homelab still lists the device
+until you remove it there.
 
 **Lost or stolen device:** remove it right away, from the homelab or from your phone (`/remove`,
 see [the Telegram bot](#the-telegram-invite-bot)). See also [Security](security.md#if-something-is-lost).
 
-**Device names** are lowercase letters, digits, `.`, `-` and `_`.
+**Device names** are up to 63 lowercase letters, digits, `.`, `-` and `_`, starting with a
+letter or digit.
 
 **Long-lived invites** (e.g. `--ttl 30d`, to enroll a device in an emergency) belong in a
 password manager: whoever has one can enroll a device until it's used.
@@ -171,6 +175,21 @@ One client can reach several homelabs; each enrollment adds an entry named after
 (`--alias` to choose another). Several homelabs can also share one relay: create a join code
 for each with `sudo catflap relay join-code` on the relay. Sessions to several homelabs work at
 the same time.
+
+## Homelab settings file
+
+Most settings are changed with commands (`catflap forward`, `catflap notify`). A few only live in
+the homelab's settings file: `~/.config/catflap/homelab.json` on Linux and macOS,
+`%LOCALAPPDATA%\catflap\homelab.json` on Windows. Edit it, then run `catflap restart`.
+
+| Key | Default | What it does |
+|---|---|---|
+| `ssh_user` | your user name | the user devices log in as (written into their ssh config when they enroll) |
+| `authorized_keys` | `~/.ssh/authorized_keys` (Windows admin accounts: `C:\ProgramData\ssh\administrators_authorized_keys`) | the file catflap adds device keys to; `"off"` stops catflap from managing SSH keys |
+| `allow_ssh_keys_from_anywhere` | `false` | `true` lets device keys log in over your LAN too, not only through catflap (affects keys added from then on) |
+
+Leave `relay` and `name` alone: they're set by `setup homelab` and `homelab move`, and devices
+store them when they enroll.
 
 ## Upgrading
 

@@ -36,7 +36,7 @@ in `authorized_keys` without that restriction, that older entry still works as b
 | **Someone with an unused invite** | enroll one device under that name, until the invite expires or is used. A re-enroll invite (`--replace`, `homelab move`) replaces that device, its SSH key included | anything after that; you see the device in `catflap list` (and get an alert, if set up) |
 | **A stolen client device** | connect like you did, until you remove it (and log in only if its SSH key isn't protected by a passphrase) | anything once removed |
 | **Telegram** (if you use the bot) | read the bot chat: invites, device names, status | use an invite after it was used or expired |
-| **Someone in your Telegram account** | create invites and remove devices through the bot | stay unnoticed if you have a second alert channel |
+| **Someone in your Telegram account** | create invites, open the request window and approve devices, remove devices, all through the bot | stay unnoticed if you have a second alert channel |
 | **Your ntfy/Pushover service** | read alert texts (device names, IP addresses, request codes) | change anything, approve a request |
 | **Anyone who knows your homelab's name and relay** (`homelab@relay.example.com`) | ask to join while your request window is open (a few times per hour) | get in without your approval in Telegram or on the homelab |
 | **Someone on your network or the internet** | see encrypted traffic to the relay | read it, or reach the homelab |
@@ -78,7 +78,7 @@ don't want that, run the homelab under a standard Windows account.
 
 | What | Do this |
 |---|---|
-| **A laptop or other client** | `catflap remove NAME` on the homelab, or `/remove NAME` in the Telegram bot. It's cut off immediately. |
+| **A laptop or other client** | `catflap remove NAME` on the homelab, or `/remove NAME` in the Telegram bot. It's cut off from catflap immediately. If you had also added its SSH key to `authorized_keys` yourself, remove that line too; `catflap remove` tells you. |
 | **Your phone** (with Telegram) | From another device: Telegram → Settings → Devices → end the phone's session. If in doubt, `catflap notify remove telegram` on the homelab and revoke the bot token with @BotFather (`/mybots` → API Token → Revoke). Then set it up again. |
 | **An invite you shared by mistake** | `catflap invites --revoke NAME`, or `/revoke NAME` in the bot. If it was used already, remove the device. |
 | **A notification token** (bot token, ntfy or Pushover token) | Revoke it at the service, `catflap notify remove NAME`, add the channel again with a new token. |

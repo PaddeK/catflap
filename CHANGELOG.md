@@ -6,7 +6,10 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
-- `catflap <command> -h` shows the command's options and exits cleanly; `catflap help` says so.
+- `catflap <command> -h` shows the command's options (or the overview, for commands without
+  options) and exits cleanly; `catflap help` says so.
+- Durations take days: `catflap invite NAME --ttl 7d`, `homelab move --ttl 3d`,
+  `requests on --for 1d`, `/requests on 1d`.
 - The install scripts tell you to restart a macOS or Windows homelab after an upgrade (before,
   only Linux got the hint), and warn when the relay would be upgraded without root.
 - Documentation rewritten for people new to catflap; new CONTRIBUTING.md and this changelog.

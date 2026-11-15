@@ -9,7 +9,7 @@ things are the way they are.
 
 ## Build
 
-Needs Go 1.27 or later.
+Needs Go 1.27.4 or later (see `go.mod`).
 
 ```sh
 go build -o catflap ./cmd/catflap
@@ -37,9 +37,9 @@ the temp directory and logs, and `CATFLAP_BIN=path` tests a given binary instead
 The end-to-end test trusts its self-signed certificate through `SSL_CERT_FILE`; catflap has no
 "insecure" switch, and shouldn't get one.
 
-CI (`.github/workflows/ci.yml`) runs all of these except `tests/docker.sh` on every push and pull
-request, plus shellcheck on the shell scripts. A pull request can only be merged when all CI jobs
-are green.
+CI (`.github/workflows/ci.yml`) runs all of these except `tests/docker.sh` on every pull request
+and every push to `main`, plus shellcheck on the install script and the test scripts. A pull
+request can only be merged when all CI jobs are green.
 
 ## Repository layout
 
@@ -65,7 +65,7 @@ docs/                 user guides, design, releasing
 ## Style
 
 - Go: `gofmt`, `go vet`, no new dependencies without a good reason (tailcat and `tailscale.com`
-  move together, see [releasing](docs/releasing.md#repository-settings)).
+  move together, see [releasing](docs/releasing.md#dependencies)).
 - Shell scripts: POSIX `sh` for `install.sh`, bash for tests; both pass shellcheck.
 - User-facing text (CLI output and docs): short sentences, say what to do next. Never print
   secrets (tokens, invite or join codes) where they don't belong.

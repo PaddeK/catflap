@@ -22,8 +22,8 @@ top. Not affiliated with Tailscale.
 
 ## What you need
 
-- A small **Linux VPS** with a public IPv4 address and a **DNS name** pointing to it, for the
-  relay. 1 vCPU and 512 MB RAM are plenty.
+- A small **Linux VPS** with systemd, root access, a public IPv4 address, a free port 443 and a
+  **DNS name** pointing to it, for the relay. 1 vCPU and 512 MB RAM are plenty.
 - The **machine at home** you want to reach (the "homelab"): Linux with systemd, macOS or
   Windows, with an SSH server or another service you want to reach. A Raspberry Pi works.
 - **Devices** to connect from: Linux, macOS or Windows, with the OpenSSH client (built in on all
@@ -33,13 +33,13 @@ top. Not affiliated with Tailscale.
 
 ```
 catflap setup relay --hostname relay.example.com   # on the VPS (as root)
-  -> prints: catflap setup homelab --join cfj1-…
+  -> prints: catflap setup homelab --join cfj1-…@relay.example.com
 
-catflap setup homelab --join cfj1-…                # on the homelab (your normal user)
+catflap setup homelab --join cfj1-…@relay.example.com   # on the homelab (your normal user)
 catflap invite laptop                              # on the homelab
-  -> prints: catflap enroll cfi1-…
+  -> prints: catflap enroll cfi1-…@relay.example.com
 
-catflap enroll cfi1-…                              # on the laptop
+catflap enroll cfi1-…@relay.example.com            # on the laptop
 ssh homelab                                        # done
 ```
 

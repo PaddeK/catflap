@@ -45,6 +45,9 @@ curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh
 catflap setup relay --hostname relay.example.com
 ```
 
+Logged in as a normal user with sudo instead? Put `sudo` in front of both: `… | sudo sh`, then
+`sudo catflap setup relay …`. The same goes for every relay command in these guides.
+
 It installs a system service (`catflap-relay`) running as its own unprivileged user, gets a
 certificate, and prints a **join code**:
 
@@ -87,9 +90,8 @@ irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex
 catflap setup homelab --join cfj1-…
 ```
 
-If your shell then says `catflap: command not found`: the installer printed where it put
-catflap (usually `~/.local/bin`). Open a new terminal, add that folder to your PATH, or run
-catflap by its full path, e.g. `~/.local/bin/catflap`.
+If your shell then says `catflap: command not found`, see
+[Troubleshooting](troubleshooting.md#catflap-command-not-found-right-after-installing).
 
 `setup homelab` registers the homelab with the relay and starts it as a background service that
 runs as you:
@@ -115,7 +117,15 @@ By default only SSH (port 22) is reachable through catflap. More ports come late
 
 - `--name office`: name of this homelab; it becomes the `ssh` alias on clients (default `homelab`).
 - `--forward 22 --forward 1880`: ports to expose from the start (`PORT` or `PORT=HOST:PORT`).
+  These replace the default port 22, so list 22 too if you want SSH.
+- `--force`: set up again on a machine that already is a homelab. It replaces the old setup;
+  every device has to enroll again.
 </details>
+
+**Remote Desktop instead of SSH** (Windows without the OpenSSH Server): set up with
+`--forward 3389`. When you enroll a device below, its tunnel check reports "not reachable",
+because it tests SSH; that's expected. Then run `catflap forward homelab 13389:3389` on the
+device and point Remote Desktop to `localhost:13389`.
 
 ## 4. Add your first device
 
