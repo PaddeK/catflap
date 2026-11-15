@@ -7,7 +7,8 @@ WireGuard tunnel. It embeds tailcat and Tailscale's DERP relay server, adds an a
 hop, and replaces "copy keys around by hand" with one-time invite codes.
 
 > **Status: early releases (v0.x).** It works and is in daily use. Every change runs the end-to-end
-> tests on Linux (amd64 and arm64) and the install tests on macOS and Windows. Expect rough edges.
+> tests on Linux (amd64 and arm64), the homelab service on Linux, macOS and Windows, and the install
+> tests on all three. Expect rough edges.
 > Not affiliated with Tailscale.
 
 ## Documentation
@@ -82,8 +83,9 @@ catflap notify add ntfy                             # optional second channel fo
   answers `/invite`, `/list` and `/remove` from your chat only; nothing is opened on the homelab.
 - **Three gates.** Relay admission, the homelab's live tailcat allowlist, and SSH keys. `catflap
   remove` closes all three immediately; no restarts.
-- **Platforms.** Relay: Linux. Homelab: Linux (systemd). Clients: macOS arm64, Linux amd64/arm64/32-bit ARM,
-  Windows amd64/arm64. Raspberry Pi works as homelab or client (64-bit OS: arm64; 32-bit OS: ARMv6+ build).
+- **Platforms.** Relay: Linux. Homelab and clients: Linux amd64/arm64/32-bit ARM (homelab with systemd),
+  macOS arm64/amd64, Windows amd64/arm64. Raspberry Pi works as homelab or client (64-bit OS: arm64;
+  32-bit OS: ARMv6+ build).
 
 See [Security](docs/security.md) for what this means in practice, and [the design](docs/design.md) for the details.
 
@@ -109,8 +111,11 @@ internal/relay/       embedded DERP + STUN + TLS + admission + enrollment API
 internal/homelab/     embedded tailcat server, relay agent, control socket, Telegram bot
 internal/client/      enroll, ssh ProxyCommand, ssh config, client agent
 internal/notify/      notification channels (ntfy, Pushover, Telegram, command)
-internal/setup/       systemd units, service user, firewall
+internal/setup/       services (systemd, launchd, Windows Task Scheduler), service user, firewall
+internal/osutil/      Windows admin rights and ACLs
 tests/e2e.sh          end-to-end test
+tests/systemd.sh      setup, restart, move, uninstall under real systemd (container)
+tests/service.sh      the homelab service on macOS and Windows (CI runners)
 tests/install.sh      install.sh against a goreleaser snapshot (install.ps1: Windows)
 tests/docker.sh       install.sh on several distros + e2e on amd64, arm64, ARMv7, ARMv6, in Docker
 tests/fakeservices.py fake Telegram/ntfy/Pushover for the e2e test

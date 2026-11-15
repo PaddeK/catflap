@@ -36,7 +36,7 @@ through catflap (`from="127.0.0.1,::1"`), not over your LAN.
 | **Telegram** (if you use the bot) | read the bot chat: invites, device names, status | use an invite after it was used or expired |
 | **Someone in your Telegram account** | create invites and remove devices through the bot | stay unnoticed if you have a second alert channel |
 | **Your ntfy/Pushover service** | read alert texts (device names, IP addresses, request codes) | change anything, approve a request |
-| **Anyone who knows `homelab`** | ask to join while your request window is open (a few times per hour) | get in without your approval in Telegram or on the homelab |
+| **Anyone who knows `homelab@relay`** | ask to join while your request window is open (a few times per hour) | get in without your approval in Telegram or on the homelab |
 | **Someone on your network or the internet** | see encrypted traffic to the relay | read it, or reach the homelab |
 
 ## Good habits
@@ -56,6 +56,24 @@ through catflap (`from="127.0.0.1,::1"`), not over your LAN.
 - **Review `catflap list`** now and then and remove devices you no longer use.
 - **Keep catflap up to date** (see [Upgrading](using-catflap.md#upgrading)). Releases are signed
   with build attestations; you can check them with `gh attestation verify FILE --repo PaddeK/catflap`.
+
+## Windows homelab
+
+On Windows the homelab is a scheduled task that starts at boot and runs as you, without storing
+your password. What it may do depends on your account:
+
+- **Standard account:** the homelab runs with your normal rights, like on Linux and macOS.
+- **Administrator account** (the first account on a PC usually is): the homelab runs
+  **elevated**. Windows' SSH server reads administrators' keys only from
+  `C:\ProgramData\ssh\administrators_authorized_keys`, which only an elevated process may change,
+  and catflap has to add and remove device keys there. Tailscale's Windows service runs with
+  even more rights (as SYSTEM).
+
+What elevated means here: a bug in catflap that let someone run code through the homelab would
+give them admin rights rather than your normal ones. And anything already running as you can
+change catflap's program and settings in your user folder, which the elevated task then runs.
+Windows doesn't treat that as a security boundary for administrators anyway (UAC isn't one), but
+if you want the homelab without admin rights, run it under a standard account.
 
 ## If something is lost
 

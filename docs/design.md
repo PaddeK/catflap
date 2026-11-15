@@ -11,14 +11,14 @@ catflap v1 replaces an earlier bash/python prototype (not part of this repositor
 - **Works in locked-down networks**: everything a client needs goes over TCP 443.
 - **At least as secure as the prototype**, ideally more (see [Security changes](#security-changes-vs-the-prototype)).
 
-Non-goals for v1: a GUI, multiple relays per homelab, Windows/macOS homelabs, running the relay anywhere but Linux.
+Non-goals for v1: a GUI, multiple relays per homelab, running the relay anywhere but Linux.
 
 ## Roles and platforms
 
 | Role | Command | Platforms | Runs as |
 |---|---|---|---|
 | relay | `catflap setup relay` | Linux amd64/arm64/32-bit ARM (systemd) | system service, dedicated user `catflap` |
-| homelab | `catflap setup homelab` | Linux amd64/arm64/32-bit ARM, e.g. a Raspberry Pi (systemd user service + linger); macOS (launchd) later | your normal user, no root |
+| homelab | `catflap setup homelab` | Linux amd64/arm64/32-bit ARM, e.g. a Raspberry Pi (systemd user service + linger); macOS arm64/amd64 (LaunchAgent); Windows amd64/arm64 (scheduled task at boot) | your normal user, no root (Windows admin accounts: elevated, see [below](#homelab-service-per-os)) |
 | client | `catflap enroll` | macOS arm64, Linux amd64/arm64/32-bit ARM, Windows amd64/arm64 | your normal user, no service |
 
 The **homelab is the admin**: `catflap invite`, `list`, `remove` run there. After `setup relay`, nobody needs root SSH to the relay for day-to-day work.
@@ -31,7 +31,7 @@ The **homelab is the admin**: `catflap invite`, `list`, `remove` run there. Afte
 - **The DERP server is embedded** in the relay (`tailscale.com/derp/derpserver` + `tailscale.com/net/stunserver` + Let's Encrypt via `autocert`). DERP, the enrollment API and the admin API share **port 443**. The relay needs no Go toolchain and no derper build.
   - Cost: catflap owns the ~200 lines of glue that upstream `cmd/derper` contains (TLS, timeouts, meta cert). We copy upstream's settings and keep them in step when we bump `tailscale.com`.
   - tailcat already depends on `tailscale.com`, so both sides always use the same version.
-- Static builds (`CGO_ENABLED=0`) for all six targets via goreleaser. 32-bit ARM is built for ARMv6 (`GOARM=6`), which also runs on ARMv7: every Raspberry Pi with a 32-bit OS, down to Pi 1 and Zero.
+- Static builds (`CGO_ENABLED=0`) for all seven targets via goreleaser. 32-bit ARM is built for ARMv6 (`GOARM=6`), which also runs on ARMv7: every Raspberry Pi with a 32-bit OS, down to Pi 1 and Zero.
 
 ## Big picture
 
@@ -167,7 +167,7 @@ catflap relay join-code [--ttl 1h]      # print a new join code
 catflap relay status
 
 catflap setup homelab --join CODE [--name N] [--forward PORT[=HOST:PORT]]...
-catflap homelab run                     # systemd user service entry point
+catflap homelab run [--service]         # entry point of the homelab service (systemd, launchd, Task Scheduler)
 catflap homelab move --join CODE [--ttl 24h]   # to another relay (new hostname/port), re-enroll invites
 catflap invite NAME [--ttl 15m] [--replace]   # --replace: re-enroll an existing device
 catflap requests [on [--for 1h] | off]  # request window (tap to approve)
@@ -180,7 +180,7 @@ catflap forward remove PORT...          # also cuts open connections on that por
 catflap forward list
 catflap notify add telegram|ntfy|pushover|command [--name N]   # prompts for tokens
 catflap notify list | remove NAME | test [NAME]
-catflap restart [relay|homelab]         # restarts the service of whatever is set up here (systemd)
+catflap restart [relay|homelab]         # restarts the service of whatever is set up here
 catflap uninstall [relay|homelab|client] [--yes] [--keep-binary]   # shows a plan, asks first
 sudo catflap relay remove HOMELAB       # forget a homelab that's gone without uninstall
 
@@ -217,7 +217,25 @@ catflap version
 - Agent loop: long-polls the relay for submissions, verifies, admits, retries queued revocations.
 - Control socket (`~/.local/state/catflap/control.sock`, mode 600) for `invite`, `invites`, `list`, `remove`, `forward`, `notify`, `status`. The daemon is the only writer of its state.
 - Notifications and the Telegram bot run inside the daemon (see [above](#notifications-and-the-telegram-invite-bot-v02)).
-- Files: `~/.config/catflap/homelab.json` (settings: relay, forwards), `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, agent token, devices, invites), `~/.local/state/catflap/notify.json` (600: notification channels and their tokens).
+- Files: `~/.config/catflap/homelab.json` (settings: relay, forwards), `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, agent token, devices, invites), `~/.local/state/catflap/notify.json` (600: notification channels and their tokens). Windows: all of them in `%LOCALAPPDATA%\catflap\`.
+
+#### Homelab service per OS
+
+| OS | Service | Starts | Logs |
+|---|---|---|---|
+| Linux | systemd user service `catflap` (`homelab run`), lingering on | at boot | journal |
+| macOS | LaunchAgent `catflap.homelab` (`homelab run --service`, `KeepAlive`) | in the user's login session (FileVault unlock or automatic login after a reboot) | `~/.local/state/catflap/homelab.log` |
+| Windows | scheduled task `catflap-homelab` (`homelab run --service`) | at boot, as the user via S4U (no password stored, nobody logged in) | `%LOCALAPPDATA%\catflap\homelab.log` |
+
+- `--service` logs to a file (restarted at 5 MB, the old one kept as `.1`; panics too) and runs the daemon again 10 s after an error, as systemd's `Restart=always` would.
+- `setup`, `restart`, `homelab move` and `uninstall` use one interface per OS (`internal/setup/service_*.go`): install, start, stop, restart, remove.
+- **Windows details:**
+  - Registering an S4U task needs admin rights once: setup runs `schtasks /Create /XML` directly when elevated, otherwise through one UAC prompt. The task's security descriptor lets the user read and run it (not change it), so `catflap restart` needs no prompt.
+  - Admin accounts: the task runs with `HighestAvailable`. Windows' OpenSSH reads admins' keys from `%ProgramData%\ssh\administrators_authorized_keys` (as long as `sshd_config` has its default `Match Group administrators` block, which catflap reads), and that file must only be accessible to SYSTEM and Administrators; catflap writes it and resets that ACL. Standard accounts: `LeastPrivilege` and `~\.ssh\authorized_keys`.
+  - The elevated daemon labels its control socket medium integrity, so commands that aren't elevated can connect.
+  - There is no stop command a standard user may run on the task, and `schtasks /End` kills without cleanup. So stopping goes through the control socket (`POST /shutdown`). Restart: `schtasks /Run` first (the task's `MultipleInstancesPolicy` is `Queue`, so the next run waits), then `/shutdown`; the restart completes even if it cuts the ssh session that asked.
+  - `uninstall` asks the running daemon to remove the device keys (`POST /uninstall/keys`), since it may have rights the command doesn't.
+  - The ssh user is the account name without the computer name (`DOMAIN\user` becomes `user@domain`).
 
 ### Client
 
@@ -285,7 +303,8 @@ Details and the release checklist: [releasing.md](releasing.md).
 - **Install tests** (`tests/install.sh`, `tests/install.ps1`): the install scripts against a goreleaser snapshot served on localhost: install, upgrade over a running catflap (Windows: locked exe moved aside, cleaned up later), tampered binary and missing checksum refused (existing file untouched), missing release; Windows also checks the PATH entry and its registry type, and restores your PATH afterwards.
 - **Docker platform test** (`tests/docker.sh`, local, needs Docker with arm64 emulation): `install.sh` on Alpine (busybox wget), Debian (wget / no downloader), Ubuntu and Fedora, amd64, arm64 and 32-bit ARM (v6, v7), as root and as a normal user, checking the right binary was picked; then the end-to-end test with the amd64, arm64, ARMv7 (Debian) and ARMv6 (Alpine) release binaries (`CATFLAP_BIN`). Emulation doesn't enforce ARMv6-only instructions; `GOARM=6` does.
 - **systemd test** (`tests/systemd.sh`, Docker with a privileged container running systemd): `setup relay` and `setup homelab` as real services, `restart` of both, a client as a second user, then moving the relay (backup, wipe, `--restore`: homelab and client reconnect by themselves, and a device enrolled after the backup is re-sent by the homelab), then `homelab move` to a second relay with a new hostname (service stopped and started, the client re-enrolls, its device entry and SSH key are replaced), then `uninstall` of all three roles: services, files, the relay's system user and the binaries are gone, and the homelab removed itself from the relay.
-- CI (`.github/workflows/ci.yml`): `go vet`, unit tests and the end-to-end test on amd64 and native arm64 runners; a release dry run (goreleaser snapshot of all six targets) with the install tests on Linux, macOS and Windows (PowerShell 5.1 and 7), plus shellcheck.
+- **Service test** (`tests/service.sh`, macOS and Windows CI runners): the homelab as the real LaunchAgent or scheduled task, against a local relay with a test certificate trusted system-wide: setup (Windows: boot trigger, S4U, elevated for the admin runner), a device enrolled with an SSH key and a round trip through the tunnel, the key in the right file (Windows: `administrators_authorized_keys` with an ACL of SYSTEM and Administrators only), `restart`, launchd restarting a killed homelab (macOS), `homelab move` to a second relay and re-enrolling, `uninstall` (service, key and files gone).
+- CI (`.github/workflows/ci.yml`): `go vet`, unit tests and the end-to-end test on amd64 and native arm64 runners; the systemd and service tests; a release dry run (goreleaser snapshot of all seven targets) with the install tests on Linux, macOS and Windows (PowerShell 5.1 and 7), plus shellcheck.
 
 ## Milestones
 
@@ -295,4 +314,4 @@ Details and the release checklist: [releasing.md](releasing.md).
 4. **v0.2:** notifications (ntfy, Pushover, Telegram, command) and the Telegram invite bot, `catflap restart`.
 5. **v0.3:** `catflap uninstall`, `relay remove`, relay backup/restore (moving the relay), one key per enrollment.
 6. **v0.4:** `homelab move` (relay with a new hostname/port), re-enroll invites (`invite --replace`), tap-to-approve enrollment requests.
-7. **Later:** macOS homelab (launchd).
+7. **v0.5:** homelab on macOS (LaunchAgent) and Windows (scheduled task); macOS Intel builds.

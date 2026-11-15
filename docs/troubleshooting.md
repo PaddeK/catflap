@@ -8,7 +8,7 @@ the homelab is running. Then check the logs.
 | Machine | Command |
 |---|---|
 | relay | `journalctl -u catflap-relay -f` |
-| homelab | `journalctl --user -u catflap -f` |
+| homelab | Linux: `journalctl --user -u catflap -f`; macOS: `tail -f ~/.local/state/catflap/homelab.log`; Windows: `Get-Content -Wait $env:LOCALAPPDATA\catflap\homelab.log` |
 | client | the agent log: `~/.config/catflap/agent.log` (Linux), `~/Library/Application Support/catflap/agent.log` (macOS), `%AppData%\catflap\agent.log` (Windows) |
 
 **More detail:** set `CATFLAP_DEBUG=1` to log the tunnel's internals.
@@ -21,6 +21,8 @@ the homelab is running. Then check the logs.
   [Service]
   Environment=CATFLAP_DEBUG=1
   ```
+  macOS: `launchctl setenv CATFLAP_DEBUG 1`, Windows: `setx CATFLAP_DEBUG 1`; then `catflap restart`.
+  Undo with `launchctl unsetenv CATFLAP_DEBUG` or `reg delete HKCU\Environment /v CATFLAP_DEBUG /f`.
 
 ## Setup
 
@@ -48,6 +50,28 @@ It was removed without `catflap uninstall`. Remove it on the relay: `sudo catfla
 **"could not enable lingering"**
 Run the printed `sudo loginctl enable-linger USER` once. Without it the homelab stops when you
 log out.
+
+**macOS: "launchctl bootstrap: … log in on the Mac itself"**
+The LaunchAgent runs in your login session, and over ssh without anyone logged in on the Mac
+there is none. Log in on the Mac (or turn on automatic login), then run setup again. After a
+reboot the homelab starts once you're logged in; with FileVault, unlocking at boot does that.
+
+**Windows: "no admin rights: the prompt was declined, or can't be shown"**
+Registering the boot task needs admin rights once. Run setup in a desktop session and confirm
+the Windows prompt, or run it in an elevated PowerShell (also over ssh). `catflap restart` and
+`uninstall` may ask again.
+
+**"note: nothing answers on 127.0.0.1:22"**
+No SSH server runs on the homelab. Linux: install `openssh-server`. macOS: System Settings >
+General > Sharing > Remote Login. Windows: Settings > System > Optional features > OpenSSH Server,
+then in an admin PowerShell `Start-Service sshd; Set-Service sshd -StartupType Automatic`.
+
+**Windows: ssh asks for a password although the device was enrolled**
+For administrator accounts Windows' SSH server reads keys only from
+`C:\ProgramData\ssh\administrators_authorized_keys`. catflap writes there when the homelab runs
+elevated, which setup arranges for admin accounts; `catflap status` shows the running homelab.
+If you changed `sshd_config`, check that its `Match Group administrators` block and catflap
+agree, or set `authorized_keys` in `homelab.json` to the file sshd uses.
 
 **`setup relay --restore`: "a relay is already set up here"**
 Restoring replaces the relay on this server and every homelab registered with it. If that's what
@@ -78,7 +102,7 @@ The code was mistyped or changed in transit. Copy it again in one piece. (This a
 
 **"no answer from the homelab within 2 minutes"**
 The homelab isn't running or can't reach the relay. On the homelab: `catflap status` and
-`journalctl --user -u catflap`. The invite stays valid until it expires; just run `enroll` again.
+the homelab's log (see [Logs](#logs)). The invite stays valid until it expires; just run `enroll` again.
 
 **"a device named … exists already"**
 To enroll that device again, use a re-enroll invite: `catflap invite NAME --replace`. Otherwise
@@ -168,7 +192,7 @@ Open the link catflap printed on the phone and tap **Start**, or send the `/star
 bot yourself, within 5 minutes. Then run `notify add telegram` again.
 
 **The bot doesn't answer**
-`journalctl --user -u catflap` on the homelab shows `bot:` lines. Commands older than 2 minutes
+The homelab's log (see [Logs](#logs)) shows `bot:` lines. Commands older than 2 minutes
 (sent while the homelab was offline) are skipped on purpose, and the bot says so.
 
 **ntfy on iPhone: messages only appear when the app is opened**

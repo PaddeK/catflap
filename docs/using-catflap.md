@@ -190,7 +190,8 @@ sudo catflap restart     # relay
 ```
 
 - **Homelab:** open sessions through catflap drop and reconnect in a few seconds. If you run
-  `catflap restart` through catflap itself, it warns you that your session drops.
+  `catflap restart` through catflap itself, it warns you that your session drops. On Windows the
+  installer can replace catflap while the homelab runs it; the restart switches to the new one.
 - **Relay:** connected devices reconnect on their own.
 - **Clients:** nothing to do; the background agent switches to the new version by itself.
 - `catflap status` shows the version the homelab is running; `catflap version` the installed one.
@@ -202,7 +203,7 @@ channels are kept across upgrades.
 
 | Machine | Files | If lost |
 |---|---|---|
-| homelab | `~/.config/catflap/homelab.json`, `~/.local/state/catflap/` (state and notification channels; mode 600, contains keys and tokens) | set up the homelab again with a new join code and re-enroll every device |
+| homelab | `~/.config/catflap/homelab.json`, `~/.local/state/catflap/` (state and notification channels; mode 600, contains keys and tokens). Windows: `%LOCALAPPDATA%\catflap\` | set up the homelab again with a new join code and re-enroll every device |
 | relay | one file: `sudo catflap relay backup FILE` | without a backup: set up the relay again, then the homelab (`--force`), then re-enroll every device. With one: [restore it](#moving-the-relay-to-another-server) |
 | client | nothing important | enroll the device again |
 
@@ -270,7 +271,8 @@ anything (`--yes` skips the question, `--keep-binary` keeps the catflap program 
   `catflap remove NAME`. An SSH key catflap created for you (`~/.ssh/catflap_ed25519`) is kept.
 - **Homelab:** stops and removes the service, removes the homelab from the relay together with
   its devices and open invites, removes the SSH keys catflap added to `authorized_keys`, and
-  deletes its config, state and notification channels. Its devices can't connect anymore.
+  deletes its config, state and notification channels. Its devices can't connect anymore. On
+  Windows, removing the scheduled task may ask for admin rights (UAC).
 - **Relay:** stops and removes the service and the `catflap` system user, and deletes its
   config, keys and certificates. Every homelab and device using it stops working. Ports it opened
   in the firewall are listed so you can close them; catflap doesn't close them itself, since

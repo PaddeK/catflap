@@ -10,7 +10,7 @@ binaries on their own machine.
 |---|---|
 | `catflap_linux_amd64`, `catflap_linux_arm64` | Linux binaries (static, `CGO_ENABLED=0`) |
 | `catflap_linux_arm` | Linux 32-bit ARM, ARMv6 and later (Raspberry Pi with a 32-bit OS, incl. Pi 1 and Zero) |
-| `catflap_darwin_arm64` | macOS binary (Apple silicon) |
+| `catflap_darwin_arm64`, `catflap_darwin_amd64` | macOS binaries (Apple silicon, Intel) |
 | `catflap_windows_amd64.exe`, `catflap_windows_arm64.exe` | Windows binaries |
 | `install.sh`, `install.ps1` | install scripts |
 | `checksums.txt` | SHA-256 of every file above |
@@ -56,7 +56,7 @@ Once tailcat v0.8 is out, switch `go.mod` from the pinned main commit to the tag
    git push origin v1.0.0
    ```
 
-3. The release workflow runs the tests, builds all six targets, publishes the GitHub
+3. The release workflow runs the tests, builds all seven targets, publishes the GitHub
    release with the changelog and attests every file. Check the release page and the
    workflow summary afterwards.
 

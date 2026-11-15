@@ -15,11 +15,11 @@ flowchart LR
 | Machine | What it does | Needs |
 |---|---|---|
 | **relay** | meeting point with a public address; passes encrypted traffic, can't read it | a small Linux VPS with systemd and a public IPv4 address, root access, a DNS name |
-| **homelab** | the machine you want to reach; decides who gets in | Linux with systemd, a normal user, SSH server running. **No open ports, no router changes.** |
+| **homelab** | the machine you want to reach; decides who gets in | Linux with systemd, macOS or Windows; your normal user; an SSH server (or another service to reach, e.g. Remote Desktop). **No open ports, no router changes.** |
 | **client** | laptop, desktop or second machine you connect from | Linux, macOS or Windows; OpenSSH client (built into all three) |
 
 Any cheap VPS works for the relay; 1 vCPU and 512 MB RAM should be plenty. A Raspberry Pi works as
-homelab or client.
+homelab or client, and so does a Mac mini or a Windows PC that stays on.
 
 ## 1. Prepare the relay server
 
@@ -74,13 +74,29 @@ A new join code later (e.g. after it expired): `sudo catflap relay join-code`.
 On the homelab, as **your normal user** (not root):
 
 ```sh
+# Linux / macOS
 curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh | sh
+# Windows (PowerShell)
+irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex
+
 catflap setup homelab --join cfj1-…
 ```
 
-This registers the homelab with the relay and starts it as a systemd **user** service
-(`catflap`), which keeps running after you log out ("lingering"). If catflap can't turn on
-lingering itself, it prints the one `sudo loginctl enable-linger …` command to run.
+This registers the homelab with the relay and starts it as a background service that runs as
+you:
+
+| Homelab OS | Service | Good to know |
+|---|---|---|
+| Linux | systemd **user** service `catflap` | keeps running after you log out ("lingering"); if catflap can't turn that on itself, it prints the one `sudo loginctl enable-linger …` to run |
+| macOS | LaunchAgent `catflap.homelab` | runs while you're logged in: after a reboot that means FileVault's unlock at boot or automatic login. SSH needs **Remote Login** (System Settings > General > Sharing) |
+| Windows | scheduled task `catflap-homelab` | starts at boot, nobody needs to log in. Setting it up asks once for admin rights (UAC). SSH needs the **OpenSSH Server** (Settings > System > Optional features); without it, forward Remote Desktop instead: `--forward 3389` |
+
+setup tells you if nothing answers on a forwarded port yet, e.g. no SSH server.
+
+On Windows, if your account is an administrator (the first account on a PC usually is), the
+homelab runs **elevated**: Windows' SSH server reads admins' keys only from
+`C:\ProgramData\ssh\administrators_authorized_keys`, which only an elevated process can change.
+See [Security](security.md#windows-homelab) for what that means.
 
 By default only SSH (port 22) is reachable through catflap. More ports come later with
 `catflap forward add`, see [Using catflap](using-catflap.md#more-ports-forwards).

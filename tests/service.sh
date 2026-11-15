@@ -24,6 +24,7 @@ if [ "${CI:-}" != true ] && [ "${CATFLAP_SERVICE_TEST:-}" != yes ]; then
 	exit 2
 fi
 
+trap 'echo "service.sh: line $LINENO failed: $BASH_COMMAND" >&2' ERR
 T=$(mktemp -d)
 PIDS=()
 HL_LOG=
@@ -43,7 +44,7 @@ cleanup() {
 		for f in "$T"/*.log "$HL_LOG"; do [ -f "$f" ] && { echo "--- $f"; tail -40 "$f"; }; done
 	fi
 	"$CF" uninstall homelab --yes > /dev/null 2>&1
-	for p in "${PIDS[@]}"; do kill "$p" 2> /dev/null; done
+	for p in ${PIDS[@]+"${PIDS[@]}"}; do kill "$p" 2> /dev/null; done
 	if [ $OS = mac ]; then
 		sudo security delete-certificate -c catflap-service-test /Library/Keychains/System.keychain > /dev/null 2>&1
 		pkill -f "$T/" 2> /dev/null
@@ -73,13 +74,13 @@ fi
 echo "== trusted test certificate + fake sshd"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=catflap-service-test \
 	-addext subjectAltName=IP:127.0.0.1 -addext extendedKeyUsage=serverAuth \
-	-keyout "$T/key.pem" -out "$T/cert.pem" 2> /dev/null
+	-keyout "$T/key.pem" -out "$T/cert.pem" 2> "$T/openssl.log" || { cat "$T/openssl.log"; exit 1; }
 if [ $OS = mac ]; then
 	# Trust settings want a GUI confirmation since macOS 11, unless allowed:
-	sudo security authorizationdb write com.apple.trust-settings.admin allow > /dev/null
+	sudo security authorizationdb write com.apple.trust-settings.admin allow || true
 	sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$T/cert.pem"
 else
-	certutil -addstore -f Root "$(cygpath -w "$T/cert.pem")" > /dev/null
+	certutil -addstore -f Root "$(cygpath -w "$T/cert.pem")" > "$T/certutil.log" 2>&1 || { cat "$T/certutil.log"; exit 1; }
 fi
 
 "$PY" -I - "$(nat "$T/sshd.port")" << 'PY' &
