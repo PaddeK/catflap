@@ -19,6 +19,7 @@ import (
 	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/fsutil"
 	"github.com/PaddeK/catflap/internal/notify"
+	"github.com/PaddeK/catflap/internal/osutil"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
@@ -52,10 +53,15 @@ type Daemon struct {
 	reqMu    sync.Mutex
 	reqs     map[string]*pendingRequest // enrollment requests (tap to approve)
 	reqUntil time.Time                  // request window open until
+
+	shutdown context.CancelFunc // ends Run (control route POST /shutdown)
+	started  time.Time
 }
 
 // Run starts the homelab daemon and blocks until ctx is done.
 func Run(ctx context.Context, p Paths) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	cfg, err := LoadConfig(p)
 	if err != nil {
 		return err
@@ -74,6 +80,9 @@ func Run(ctx context.Context, p Paths) error {
 		relay: api.NewClient(cfg.Relay, st.AgentToken),
 		logf:  log.Printf,
 		wake:  make(chan struct{}, 1),
+
+		shutdown: cancel,
+		started:  time.Now(),
 	}
 	d.disp = notify.NewDispatcher(d.logf)
 	d.reqs = map[string]*pendingRequest{}
@@ -520,14 +529,15 @@ type InviteInfo struct {
 
 // StatusInfo is returned by the status command.
 type StatusInfo struct {
-	Name      string   `json:"name"`
-	Version   string   `json:"version"` // of the running daemon
-	Relay     string   `json:"relay"`
-	Addr      string   `json:"addr"`
-	Devices   int      `json:"devices"`
-	Invites   int      `json:"invites"`
-	Forwards  []string `json:"forwards"`
-	NeedsSync bool     `json:"needs_sync"`
+	Name      string    `json:"name"`
+	Version   string    `json:"version"` // of the running daemon
+	Relay     string    `json:"relay"`
+	Addr      string    `json:"addr"`
+	Devices   int       `json:"devices"`
+	Invites   int       `json:"invites"`
+	Forwards  []string  `json:"forwards"`
+	NeedsSync bool      `json:"needs_sync"`
+	Started   time.Time `json:"started"`
 }
 
 func (d *Daemon) serveControl(ctx context.Context) error {
@@ -540,6 +550,11 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		return fmt.Errorf("control socket: %w", err)
 	}
 	os.Chmod(d.paths.Socket, 0o600)
+	// Elevated on Windows (admin accounts), the socket would otherwise be
+	// out of reach of catflap commands that aren't.
+	if err := osutil.AllowMediumIntegrity(d.paths.Socket); err != nil {
+		d.logf("control socket: %v", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /invite", func(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +633,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
-		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), NeedsSync: d.st.NeedsSync}
+		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), NeedsSync: d.st.NeedsSync, Started: d.started}
 		for _, inv := range d.st.Invites {
 			if inv.Used == nil {
 				s.Invites++
@@ -661,6 +676,26 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 			return
 		}
 		ctlJSON(w, struct{}{})
+	})
+	// Stop the daemon: the service managers without a stop command of
+	// their own that works for the user (Windows) use this.
+	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
+		d.logf("shutting down (asked on the control socket)")
+		ctlJSON(w, struct{}{})
+		d.shutdown()
+	})
+	// Remove the SSH keys catflap added (uninstall, before stopping): the
+	// daemon may have rights the command doesn't (Windows admin accounts).
+	mux.HandleFunc("POST /uninstall/keys", func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		devs := slices.Clone(d.st.Devices)
+		d.mu.Unlock()
+		n, err := removeDeviceKeys(d.cfg, devs)
+		if err != nil {
+			ctlErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		ctlJSON(w, map[string]int{"removed": n})
 	})
 	d.notifyRoutes(ctx, mux)
 	d.requestRoutes(mux)

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/PaddeK/catflap/internal/client"
 	"github.com/PaddeK/catflap/internal/fsutil"
@@ -77,7 +76,7 @@ func PlanUninstall(role string, keepBinary bool) (*UninstallPlan, error) {
 	}
 	if info, ok := homelab.Inspect(hp); ok {
 		if role == "" || role == "homelab" {
-			if os.Geteuid() == 0 && os.Getenv("CATFLAP_DIR") == "" && role == "homelab" {
+			if runtime.GOOS != "windows" && os.Geteuid() == 0 && os.Getenv("CATFLAP_DIR") == "" && role == "homelab" {
 				return nil, errors.New("the homelab belongs to your normal user: run catflap uninstall without sudo")
 			}
 			p.Homelab, p.HomelabPaths = info, hp
@@ -171,12 +170,29 @@ func Uninstall(ctx context.Context, p *UninstallPlan, out io.Writer) error {
 	step := func(s string) { fmt.Fprintf(out, "==> %s\n", s) }
 	if h := p.Homelab; h != nil {
 		step("removing homelab " + h.Name)
-		if err := stopHomelabService(out, p.HomelabPaths); err != nil {
+		svc, managed := usesService(p.HomelabPaths)
+		running := homelabRunning(p.HomelabPaths)
+		if running && !managed {
+			return errors.New("the homelab is still running (started without the service?); stop `catflap homelab run` first, then run uninstall again")
+		}
+		// The running homelab removes the SSH keys: it may have rights we
+		// don't (elevated on Windows admin accounts).
+		keys, keysDone := 0, false
+		if running {
+			var r struct{ Removed int }
+			if homelab.Control(p.HomelabPaths).Do(ctx, "POST", "/uninstall/keys", nil, &r) == nil {
+				keys, keysDone = r.Removed, true
+			}
+		}
+		if err := stopHomelabService(out, p.HomelabPaths, svc, managed); err != nil {
 			return err
 		}
-		res, err := homelab.Uninstall(ctx, p.HomelabPaths)
+		res, err := homelab.Uninstall(ctx, p.HomelabPaths, keysDone)
 		if err != nil {
 			return err
+		}
+		if keysDone {
+			res.KeysRemoved = keys
 		}
 		if res.RelayErr != nil {
 			fmt.Fprintf(out, "    could not remove it from the relay (%v);\n    on the relay run: sudo catflap relay remove %s\n", res.RelayErr, h.Name)
@@ -186,13 +202,11 @@ func Uninstall(ctx context.Context, p *UninstallPlan, out io.Writer) error {
 		if res.KeysRemoved > 0 {
 			fmt.Fprintf(out, "    removed %d SSH key(s) from %s\n", res.KeysRemoved, h.AuthKeys)
 		}
+		if res.KeysErr != nil {
+			fmt.Fprintf(out, "    could not remove the devices' SSH keys (%v);\n    delete the lines ending in catflap:<device> from %s yourself (as admin on Windows)\n", res.KeysErr, h.AuthKeys)
+		}
 		for _, f := range res.FilesRemoved {
 			fmt.Fprintf(out, "    deleted %s\n", f)
-		}
-		if os.Getenv("CATFLAP_DIR") == "" {
-			if u, err := user.Current(); err == nil {
-				fmt.Fprintf(out, "    (lingering stays on for user %s; other user services may need it.\n     Turn it off with: sudo loginctl disable-linger %s)\n", u.Username, u.Username)
-			}
 		}
 	}
 	if p.Client {
@@ -232,25 +246,17 @@ func Uninstall(ctx context.Context, p *UninstallPlan, out io.Writer) error {
 	return nil
 }
 
-// stopHomelabService stops and removes the user service. Under CATFLAP_DIR
-// (tests, extra instances) there is no service; the daemon must be stopped.
-func stopHomelabService(out io.Writer, hp homelab.Paths) error {
-	if os.Getenv("CATFLAP_DIR") == "" && runtime.GOOS == "linux" && hasCmd("systemctl") && unitLoaded(true, homelabService) {
-		if err := run(io.Discard, "systemctl", "--user", "disable", "--now", homelabService); err != nil {
+// stopHomelabService stops and removes the homelab's service. Under
+// CATFLAP_DIR (tests, extra instances) there is no service; the daemon must
+// be stopped.
+func stopHomelabService(out io.Writer, hp homelab.Paths, svc homelabService, managed bool) error {
+	if managed {
+		if err := svc.remove(out); err != nil {
 			return err
 		}
-		home, _ := os.UserHomeDir()
-		unitDir := filepath.Join(home, ".config", "systemd", "user")
-		if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-			unitDir = filepath.Join(x, "systemd", "user")
-		}
-		os.Remove(filepath.Join(unitDir, "catflap.service"))
-		run(io.Discard, "systemctl", "--user", "daemon-reload")
-		fmt.Fprintln(out, "    stopped and removed the catflap user service")
 	}
 	// Still running (started by hand with `catflap homelab run`)?
-	if c, err := net.DialTimeout("unix", hp.Socket, time.Second); err == nil {
-		c.Close()
+	if homelabRunning(hp) {
 		return errors.New("the homelab is still running (started without the service?); stop `catflap homelab run` first, then run uninstall again")
 	}
 	return nil

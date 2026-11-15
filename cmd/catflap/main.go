@@ -7,8 +7,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"sort"
@@ -75,9 +75,9 @@ Other:
   catflap uninstall [relay|homelab|client]   remove catflap from this machine (asks first)
   catflap version
 
-Daemons (started by systemd):
+Daemons (started by the service manager):
   catflap relay run [--config FILE]
-  catflap homelab run
+  catflap homelab run [--service]     --service: log to a file, start again after errors
   catflap agent                        client tunnel shared by all connections
                                        (started on demand, exits when idle)
 `
@@ -122,9 +122,17 @@ func run(ctx context.Context, args []string) error {
 			return cmdHomelabMove(ctx, args[1:])
 		}
 		if len(args) > 0 && args[0] == "run" {
+			fs := newFlags("homelab run")
+			service := fs.Bool("service", false, "run as the macOS/Windows service: log to a file, start again after errors")
+			if _, err := parse(fs, args[1:]); err != nil {
+				return err
+			}
 			p, err := homelab.DefaultPaths()
 			if err != nil {
 				return err
+			}
+			if *service {
+				return homelab.RunService(ctx, p)
 			}
 			return homelab.Run(ctx, p)
 		}
@@ -250,7 +258,7 @@ func cmdSetupHomelab(ctx context.Context, args []string) error {
 	join := fs.String("join", "", "join code printed by `catflap setup relay` (required)")
 	name := fs.String("name", "homelab", "name of this homelab (default ssh alias on clients)")
 	force := fs.Bool("force", false, "replace an existing homelab setup")
-	noService := fs.Bool("no-service", false, "don't install the systemd user service")
+	noService := fs.Bool("no-service", false, "don't install the background service (systemd user service, LaunchAgent or scheduled task)")
 	var forwards forwardFlag
 	fs.Var(&forwards, "forward", "tunnel port to expose, PORT or PORT=HOST:PORT (repeatable; default 22)")
 	if _, err := parse(fs, args); err != nil {
@@ -270,17 +278,21 @@ func cmdSetupHomelab(ctx context.Context, args []string) error {
 	fmt.Printf("==> registered homelab %q with relay %s\n", cfg.Name, cfg.Relay)
 	if *noService {
 		fmt.Println("Start it with: catflap homelab run")
-	} else if err := setup.HomelabService(os.Stdout); err != nil {
+	} else if err := setup.HomelabService(ctx, os.Stdout); err != nil {
 		return err
 	}
+	setup.CheckForwardTargets(os.Stdout, cfg)
+	if *noService {
+		return nil
+	}
 	fmt.Printf(`
-Homelab is running.  Logs: journalctl --user -u catflap -f
+Homelab is running.  Logs: %s
 
 Add your first device:
 
   catflap invite my-laptop
 
-`)
+`, setup.HomelabLogs())
 	return nil
 }
 
@@ -504,10 +516,23 @@ func ctlErr(err error) error {
 		return errors.New(ae.Msg) // the homelab answered; show just its message
 	}
 	// Only failures to reach the socket mean the daemon isn't running.
-	if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "connection refused") {
-		return errors.New("the homelab is not running here (systemctl --user status catflap)")
+	if notRunning(err) {
+		return fmt.Errorf("the homelab is not running here (%s)", startHint())
 	}
 	return err
+}
+
+// notRunning reports whether err means the control socket isn't there.
+func notRunning(err error) bool {
+	var oe *net.OpError
+	return errors.As(err, &oe) && oe.Op == "dial"
+}
+
+func startHint() string {
+	if setup.HomelabServiceInstalled() {
+		return "start it with: catflap restart; logs: " + setup.HomelabLogs()
+	}
+	return "start it with: catflap homelab run"
 }
 
 func cmdInvite(ctx context.Context, args []string) error {
@@ -795,7 +820,11 @@ func cmdStatus(ctx context.Context) error {
 			found = true
 			var s homelab.StatusInfo
 			if err := homelab.Control(p).Do(ctx, "GET", "/status", nil, &s); err != nil {
-				fmt.Printf("homelab: %q via %s - NOT RUNNING (%v)\n", cfg.Name, cfg.Relay, ctlErr(err))
+				why := err.Error()
+				if notRunning(err) {
+					why = startHint()
+				}
+				fmt.Printf("homelab: %q via %s - NOT RUNNING (%s)\n", cfg.Name, cfg.Relay, why)
 			} else {
 				ver := s.Version
 				if ver == "" {
@@ -865,7 +894,7 @@ func cmdHomelabMove(ctx context.Context, args []string) error {
 	if res.OldRelayErr != nil {
 		fmt.Printf("    could not remove it from the old relay (%v);\n    there: sudo catflap relay remove %s\n", res.OldRelayErr, info.Name)
 	}
-	if os.Getenv("CATFLAP_DIR") != "" || !setupHasService() {
+	if os.Getenv("CATFLAP_DIR") != "" || !setup.HomelabServiceInstalled() {
 		fmt.Println("    start it again with: catflap homelab run")
 	}
 	if len(res.Invites) == 0 {
@@ -893,11 +922,6 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%d minutes", d/time.Minute)
 	}
 	return d.String()
-}
-
-// setupHasService reports whether the homelab runs as a systemd user service.
-func setupHasService() bool {
-	return exec.Command("systemctl", "--user", "cat", "catflap").Run() == nil
 }
 
 // cmdRequests shows or opens/closes the enrollment request window.

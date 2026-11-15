@@ -1,5 +1,6 @@
 // Package setup installs catflap as a service: the relay as a hardened
-// system service, the homelab as a systemd user service with lingering.
+// systemd system service, the homelab as the user's own service (systemd
+// user service, launchd LaunchAgent or a scheduled task, see service_*.go).
 package setup
 
 import (
@@ -61,20 +62,6 @@ LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-`
-
-const homelabUnit = `[Unit]
-Description=catflap homelab (tailcat server + relay agent)
-After=network-online.target
-
-[Service]
-ExecStart=%s homelab run
-Restart=always
-RestartSec=3
-NoNewPrivileges=yes
-
-[Install]
-WantedBy=default.target
 `
 
 // RelayOptions are the inputs of `catflap setup relay`.
@@ -271,43 +258,6 @@ func openFirewall(out io.Writer, cfg relay.Config) {
 	}
 }
 
-// HomelabService installs and starts the homelab as a systemd user service.
-func HomelabService(out io.Writer) error {
-	if runtime.GOOS != "linux" {
-		return errors.New("the homelab service currently supports Linux (systemd) only; run `catflap homelab run` yourself")
-	}
-	if os.Geteuid() == 0 {
-		return errors.New("run setup homelab as the user who should own the homelab, not as root")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	bin, err := installSelf(filepath.Join(home, ".local", "bin", "catflap"))
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "==> installed %s\n", bin)
-	unitDir := filepath.Join(home, ".config", "systemd", "user")
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		unitDir = filepath.Join(x, "systemd", "user")
-	}
-	if err := fsutil.WriteFile(filepath.Join(unitDir, "catflap.service"), fmt.Appendf(nil, homelabUnit, bin), 0o644); err != nil {
-		return err
-	}
-	u, _ := user.Current()
-	if err := run(io.Discard, "loginctl", "enable-linger", u.Username); err != nil {
-		fmt.Fprintf(out, "    could not enable lingering (%v); run: sudo loginctl enable-linger %s\n    (without it the homelab stops when you log out)\n", err, u.Username)
-	}
-	if err := run(out, "systemctl", "--user", "daemon-reload"); err != nil {
-		return err
-	}
-	if isActiveUser("catflap") {
-		return run(out, "systemctl", "--user", "restart", "catflap")
-	}
-	return run(out, "systemctl", "--user", "enable", "--now", "catflap")
-}
-
 // installSelf copies the running binary to dst unless it already is dst.
 func installSelf(dst string) (string, error) {
 	exe, err := os.Executable()
@@ -317,7 +267,7 @@ func installSelf(dst string) (string, error) {
 	if r, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = r
 	}
-	if exe == dst {
+	if exe == dst || (runtime.GOOS == "windows" && strings.EqualFold(exe, dst)) {
 		return dst, nil
 	}
 	data, err := os.ReadFile(exe)

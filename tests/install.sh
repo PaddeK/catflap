@@ -27,6 +27,7 @@ Linux-x86_64) ASSET=catflap_linux_amd64 ;;
 Linux-aarch64) ASSET=catflap_linux_arm64 ;;
 Linux-armv6*|Linux-armv7*|Linux-armv8l) ASSET=catflap_linux_arm ;;
 Darwin-arm64) ASSET=catflap_darwin_arm64 ;;
+Darwin-x86_64) ASSET=catflap_darwin_amd64 ;;
 *) echo "no release build for this machine" >&2; exit 1 ;;
 esac
 

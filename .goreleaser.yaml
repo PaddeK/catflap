@@ -26,6 +26,7 @@ builds:
       # with a 32-bit OS, including Pi 1, Zero and Zero W.
       - linux_arm_6
       - darwin_arm64
+      - darwin_amd64_v1   # Intel Macs, e.g. an older Mac mini as the homelab
       - windows_amd64_v1
       - windows_arm64
 

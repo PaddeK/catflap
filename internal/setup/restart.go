@@ -18,8 +18,8 @@ import (
 // (or a hand edit of its config), without knowing systemd's unit names.
 
 const (
-	relayService   = "catflap-relay" // system service
-	homelabService = "catflap"       // user service
+	relayService    = "catflap-relay" // system service
+	homelabUnitName = "catflap"       // systemd user service
 )
 
 // RestartRelay restarts the relay's system service (needs root).
@@ -44,40 +44,37 @@ func RestartRelay(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
-// RestartHomelab restarts the homelab's user service.
+// RestartHomelab restarts the homelab's service.
 func RestartHomelab(ctx context.Context, out io.Writer) error {
-	if err := checkSystemd(); err != nil {
-		return err
-	}
-	if os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		return errors.New("the homelab runs as your own user: run catflap restart without sudo")
-	}
-	if !unitLoaded(true, homelabService) {
-		return errors.New("there is no catflap user service here (set up with --no-service?); restart `catflap homelab run` the way you started it")
-	}
-	if ViaCatflap(os.Getenv("SSH_CONNECTION")) {
-		// Restarting cuts this very session. Don't wait for the restart
-		// (we'd die mid-command); systemd finishes it on its own.
-		fmt.Fprintln(out, "You are connected through catflap, so this session drops now.")
-		fmt.Fprintln(out, "Reconnect in a few seconds; `catflap status` then shows the running version.")
-		return run(out, "systemctl", "--user", "restart", "--no-block", homelabService)
-	}
-	fmt.Fprintln(out, "restarting the homelab; open sessions through catflap drop and devices reconnect ...")
-	if err := run(out, "systemctl", "--user", "restart", homelabService); err != nil {
-		return err
 	}
 	p, err := homelab.DefaultPaths()
 	if err != nil {
 		return err
 	}
-	var s homelab.StatusInfo
-	up := waitFor(15*time.Second, func() bool {
-		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		return homelab.Control(p).Do(cctx, "GET", "/status", nil, &s) == nil
-	})
+	svc, err := newHomelabService(p)
+	if err != nil {
+		return err
+	}
+	if !svc.installed() {
+		return errors.New("the homelab doesn't run as a service here (set up with --no-service?); restart `catflap homelab run` the way you started it")
+	}
+	if ViaCatflap(os.Getenv("SSH_CONNECTION")) {
+		// Restarting cuts this very session. Don't wait for the restart
+		// (we'd die mid-command); the service manager finishes it on its own.
+		fmt.Fprintln(out, "You are connected through catflap, so this session drops now.")
+		fmt.Fprintln(out, "Reconnect in a few seconds; `catflap status` then shows the running version.")
+		return svc.restart(out, true)
+	}
+	fmt.Fprintln(out, "restarting the homelab; open sessions through catflap drop and devices reconnect ...")
+	began := time.Now().Add(-time.Second)
+	if err := svc.restart(out, false); err != nil {
+		return err
+	}
+	s, up := waitHomelabUp(ctx, p, began, 20*time.Second)
 	if !up {
-		return errors.New("the homelab did not come back up; see: journalctl --user -u catflap -n 50")
+		return fmt.Errorf("the homelab did not come back up; see: %s", svc.logs())
 	}
 	fmt.Fprintf(out, "homelab %q running catflap %s again: %d device(s), forwarding %s\n", s.Name, s.Version, s.Devices, strings.Join(s.Forwards, ", "))
 	return nil
@@ -92,10 +89,10 @@ func ViaCatflap(sshConnection string) bool {
 
 func checkSystemd() error {
 	if runtime.GOOS != "linux" {
-		return errors.New("catflap restart works with systemd on Linux only")
+		return errors.New("the relay runs on Linux only")
 	}
 	if !hasCmd("systemctl") {
-		return errors.New("systemctl not found: catflap restart needs systemd")
+		return errors.New("systemctl not found: the relay needs systemd")
 	}
 	return nil
 }

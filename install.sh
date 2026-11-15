@@ -64,11 +64,9 @@ main() {
 	*) die "no build for $arch (catflap has amd64, arm64 and 32-bit ARM (ARMv6+) builds)" ;;
 	esac
 	if [ "$os" = darwin ] && [ "$arch" = amd64 ]; then
-		# A shell under Rosetta reports x86_64 on Apple silicon.
+		# A shell under Rosetta reports x86_64 on Apple silicon: take the native build.
 		if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
 			arch=arm64
-		else
-			die "the macOS build is for Apple silicon (arm64) only"
 		fi
 	fi
 	asset="catflap_${os}_${arch}"

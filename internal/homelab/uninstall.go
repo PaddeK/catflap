@@ -42,6 +42,26 @@ func Inspect(p Paths) (*Info, bool) {
 	return info, true
 }
 
+// removeDeviceKeys removes the SSH keys catflap added for devs and returns
+// how many lines went.
+func removeDeviceKeys(cfg Config, devs []Device) (int, error) {
+	path, ok := cfg.authorizedKeysPath()
+	if !ok {
+		return 0, nil
+	}
+	n := 0
+	for _, d := range devs {
+		removed, err := removeAuthorizedKey(path, d.Name)
+		if err != nil {
+			return n, fmt.Errorf("%s: %w", path, err)
+		}
+		if removed {
+			n++
+		}
+	}
+	return n, nil
+}
+
 // Deregister asks the relay to forget this homelab: its record, its devices
 // and its open invites. Relays before v0.3 don't support it.
 func Deregister(ctx context.Context, relay, token string) error {
@@ -62,13 +82,15 @@ func Deregister(ctx context.Context, relay, token string) error {
 type UninstallResult struct {
 	RelayErr     error    // de-registering failed (remove it on the relay by hand)
 	KeysRemoved  int      // authorized_keys lines removed
+	KeysErr      error    // removing them failed (remove them by hand)
 	FilesRemoved []string // files and directories deleted
 }
 
 // Uninstall removes the homelab's data: it de-registers from the relay,
 // removes the SSH keys catflap added, and deletes config, state and
-// notification channels. The service must be stopped before.
-func Uninstall(ctx context.Context, p Paths) (UninstallResult, error) {
+// notification channels. The service must be stopped before. keysDone
+// skips the keys (the daemon removed them already, see POST /uninstall/keys).
+func Uninstall(ctx context.Context, p Paths, keysDone bool) (UninstallResult, error) {
 	var res UninstallResult
 	var cfg Config
 	fsutil.ReadJSON(p.Config, &cfg)
@@ -79,16 +101,8 @@ func Uninstall(ctx context.Context, p Paths) (UninstallResult, error) {
 	if cfg.Relay != "" && st.AgentToken != "" {
 		res.RelayErr = Deregister(ctx, cfg.Relay, st.AgentToken)
 	}
-	if path, ok := cfg.authorizedKeysPath(); ok {
-		for _, d := range st.Devices {
-			removed, err := removeAuthorizedKey(path, d.Name)
-			if err != nil {
-				return res, fmt.Errorf("authorized_keys: %w", err)
-			}
-			if removed {
-				res.KeysRemoved++
-			}
-		}
+	if !keysDone {
+		res.KeysRemoved, res.KeysErr = removeDeviceKeys(cfg, st.Devices)
 	}
 	for _, f := range []string{p.State, p.Notify, p.Socket, p.Config} {
 		if err := os.Remove(f); err == nil {

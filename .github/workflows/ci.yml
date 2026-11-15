@@ -40,7 +40,26 @@ jobs:
           go-version-file: go.mod
       - run: tests/systemd.sh
 
-  # All six release targets build, the goreleaser config is valid, and the install
+  # The homelab as the real macOS LaunchAgent / Windows scheduled task: setup, a
+  # device through the tunnel, restart, move, uninstall.
+  service:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: homelab service test
+        shell: bash
+        run: tests/service.sh
+
+  # All seven release targets build, the goreleaser config is valid, and the install
   # scripts install the snapshot on each OS (incl. the tamper checks).
   release-dry-run:
     strategy:
@@ -65,7 +84,7 @@ jobs:
         name: unit tests on this OS
         run: go test ./...
       - if: runner.os == 'Linux'
-        run: shellcheck install.sh tests/install.sh tests/docker.sh tests/systemd.sh
+        run: shellcheck install.sh tests/install.sh tests/docker.sh tests/systemd.sh tests/service.sh
       - if: runner.os != 'Windows'
         run: tests/install.sh dist
       - if: runner.os == 'Windows'

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/PaddeK/catflap/internal/fsutil"
+	"github.com/PaddeK/catflap/internal/osutil"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -122,5 +123,11 @@ func writeLines(path string, lines []string) error {
 	if data != "" {
 		data += "\n"
 	}
-	return fsutil.WriteFile(path, []byte(data), 0o600)
+	if err := fsutil.WriteFile(path, []byte(data), 0o600); err != nil {
+		return err
+	}
+	if isAdminKeysFile(path) { // sshd ignores the file unless only admins can access it
+		return osutil.RestrictToAdmins(path)
+	}
+	return nil
 }

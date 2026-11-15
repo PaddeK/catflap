@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/user"
 	"strings"
 
 	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/fsutil"
+	"github.com/PaddeK/catflap/internal/osutil"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/types/key"
@@ -81,9 +81,7 @@ func Join(ctx context.Context, p Paths, o JoinOptions) (Config, error) {
 	if len(cfg.Forwards) == 0 {
 		cfg.Forwards = map[string]string{"22": "127.0.0.1:22"}
 	}
-	if u, err := user.Current(); err == nil {
-		cfg.SSHUser = u.Username
-	}
+	cfg.SSHUser = osutil.SSHUsername()
 	var oldCfg Config
 	if fsutil.ReadJSON(p.Config, &oldCfg) == nil {
 		// Keep hand-made settings on --force.

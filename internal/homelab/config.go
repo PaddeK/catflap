@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/PaddeK/catflap/internal/fsutil"
+	"github.com/PaddeK/catflap/internal/osutil"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/types/key"
@@ -88,22 +90,26 @@ type UsedInvite struct {
 type Paths struct {
 	Config, State, Socket string
 	Notify                string // notification channels incl. tokens (600)
+	Log                   string // log file of `homelab run --service` (macOS, Windows)
 }
 
 // DefaultPaths returns the file locations. CATFLAP_DIR puts everything in
 // one directory (used by tests and for running several instances).
 func DefaultPaths() (Paths, error) {
 	if d := os.Getenv("CATFLAP_DIR"); d != "" {
-		return Paths{
-			Config: filepath.Join(d, "homelab.json"),
-			State:  filepath.Join(d, "homelab-state.json"),
-			Socket: filepath.Join(d, "control.sock"),
-			Notify: filepath.Join(d, "notify.json"),
-		}, nil
+		return dirPaths(d, d), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return Paths{}, err
+	}
+	if runtime.GOOS == "windows" { // everything in %LOCALAPPDATA%\catflap
+		local, err := os.UserCacheDir()
+		if err != nil {
+			local = filepath.Join(home, "AppData", "Local")
+		}
+		d := filepath.Join(local, "catflap")
+		return dirPaths(d, d), nil
 	}
 	cfg := filepath.Join(home, ".config")
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
@@ -113,12 +119,17 @@ func DefaultPaths() (Paths, error) {
 	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
 		st = x
 	}
+	return dirPaths(filepath.Join(cfg, "catflap"), filepath.Join(st, "catflap")), nil
+}
+
+func dirPaths(cfgDir, stateDir string) Paths {
 	return Paths{
-		Config: filepath.Join(cfg, "catflap", "homelab.json"),
-		State:  filepath.Join(st, "catflap", "homelab-state.json"),
-		Socket: filepath.Join(st, "catflap", "control.sock"),
-		Notify: filepath.Join(st, "catflap", "notify.json"),
-	}, nil
+		Config: filepath.Join(cfgDir, "homelab.json"),
+		State:  filepath.Join(stateDir, "homelab-state.json"),
+		Socket: filepath.Join(stateDir, "control.sock"),
+		Notify: filepath.Join(stateDir, "notify.json"),
+		Log:    filepath.Join(stateDir, "homelab.log"),
+	}
 }
 
 // LoadConfig reads and validates the config.
@@ -134,9 +145,7 @@ func LoadConfig(p Paths) (Config, error) {
 		c.Name = "homelab"
 	}
 	if c.SSHUser == "" {
-		if u, err := user.Current(); err == nil {
-			c.SSHUser = u.Username
-		}
+		c.SSHUser = osutil.SSHUsername()
 	}
 	if c.Forwards == nil { // missing; an explicit {} means "no forwards"
 		c.Forwards = map[string]string{"22": "127.0.0.1:22"}
@@ -157,13 +166,73 @@ func (c Config) authorizedKeysPath() (string, bool) {
 	case "off":
 		return "", false
 	case "":
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		return filepath.Join(home, ".ssh", "authorized_keys"), true
+		p := defaultAuthorizedKeys()
+		return p, p != ""
 	}
 	return c.AuthorizedKeys, true
+}
+
+// defaultAuthorizedKeys is ~/.ssh/authorized_keys, except for Windows
+// administrators: their keys are in %ProgramData%\ssh\administrators_authorized_keys
+// as long as sshd_config says so (it does by default).
+func defaultAuthorizedKeys() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	user := filepath.Join(home, ".ssh", "authorized_keys")
+	if runtime.GOOS != "windows" || !osutil.IsAdmin() {
+		return user
+	}
+	pd := os.Getenv("ProgramData")
+	if pd == "" {
+		pd = `C:\ProgramData`
+	}
+	conf, err := os.ReadFile(filepath.Join(pd, "ssh", "sshd_config"))
+	if err != nil { // no OpenSSH server (yet): its default config uses the admin file
+		return filepath.Join(pd, "ssh", "administrators_authorized_keys")
+	}
+	if p, ok := adminKeysFile(string(conf), pd); ok {
+		return p
+	}
+	return user
+}
+
+// adminKeysFile finds the AuthorizedKeysFile of a "Match Group
+// administrators" block in a Windows sshd_config.
+func adminKeysFile(conf, programData string) (string, bool) {
+	in := false
+	for _, line := range strings.Split(conf, "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		switch strings.ToLower(f[0]) {
+		case "match":
+			in = false
+			for i := 1; i+1 < len(f); i += 2 {
+				if strings.EqualFold(f[i], "group") {
+					for _, g := range strings.Split(f[i+1], ",") {
+						if strings.EqualFold(g, "administrators") {
+							in = true
+						}
+					}
+				}
+			}
+		case "authorizedkeysfile":
+			if in && len(f) > 1 {
+				p := strings.ReplaceAll(f[1], "__PROGRAMDATA__", programData)
+				return filepath.FromSlash(p), true
+			}
+		}
+	}
+	return "", false
+}
+
+// isAdminKeysFile reports whether path is Windows' administrators_authorized_keys,
+// which must be readable by SYSTEM and Administrators only.
+func isAdminKeysFile(path string) bool {
+	return runtime.GOOS == "windows" && strings.EqualFold(filepath.Base(path), "administrators_authorized_keys")
 }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)

@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/PaddeK/catflap/internal/homelab"
@@ -19,31 +17,25 @@ func MoveHomelab(ctx context.Context, p homelab.Paths, joinCode string, ttl time
 	if ViaCatflap(os.Getenv("SSH_CONNECTION")) {
 		return res, 0, errors.New("you are connected through catflap: moving restarts the homelab and your session would end before you get the new invites.\nRun it on the homelab directly or over your LAN")
 	}
-	service := os.Getenv("CATFLAP_DIR") == "" && runtime.GOOS == "linux" && hasCmd("systemctl") && unitLoaded(true, homelabService)
+	svc, service := usesService(p)
 	if service {
-		if err := run(io.Discard, "systemctl", "--user", "stop", homelabService); err != nil {
+		if err := svc.stop(io.Discard); err != nil {
 			return res, 0, err
 		}
-	} else if c, err := net.DialTimeout("unix", p.Socket, time.Second); err == nil {
-		c.Close()
+	} else if homelabRunning(p) {
 		return res, 0, errors.New("the homelab is running (started without the service?); stop `catflap homelab run` first, then run move again")
 	}
 	res, err = homelab.Move(ctx, p, joinCode, ttl)
 	if service {
 		// Start again in any case: with the new relay, or unchanged on failure.
-		if serr := run(io.Discard, "systemctl", "--user", "start", homelabService); serr != nil && err == nil {
+		if serr := svc.start(io.Discard); serr != nil && err == nil {
 			err = serr
 		}
 	}
 	if err != nil || !service {
 		return res, 0, err
 	}
-	var s homelab.StatusInfo
-	waitFor(15*time.Second, func() bool {
-		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		return homelab.Control(p).Do(cctx, "GET", "/status", nil, &s) == nil
-	})
+	waitHomelabUp(ctx, p, time.Time{}, 20*time.Second)
 	var sent struct{ Sent int }
 	homelab.Control(p).Do(ctx, "POST", "/invites/telegram", nil, &sent)
 	return res, sent.Sent, nil

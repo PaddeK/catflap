@@ -424,6 +424,7 @@ check "client uninstall keeps a binary outside the install locations" bash -c "g
 
 # Homelab: refuses while the daemon runs, then removes everything.
 check "homelab uninstall refuses while the daemon runs" bash -c "$H '$CF' uninstall homelab --yes 2>&1 | grep -q 'still running'"
+check "... and leaves the SSH keys alone" grep -q "catflap:" "$T/homelab/authorized_keys"
 pkill -f "$T/catflap homelab run" || true
 for _ in $(seq 50); do [ -S "$T/homelab/control.sock" ] || break; sleep 0.1; done
 $H "$CF" uninstall homelab --yes > "$T/hun.log" 2>&1
