@@ -32,8 +32,9 @@ The release process relies on these settings (set since 2026-11-15; check them o
 - **Rulesets:**
   - *release tags are permanent*: tags `v*` can't be moved or deleted, by anyone.
   - *main: no force push or deletion*: no bypass.
-  - *main: CI must pass*: all five `ci` jobs must be green before a pull request can be
-    merged. Repository admins may push directly.
+  - *main: CI must pass*: all eight `ci` jobs (unit and end-to-end tests, release dry
+    runs, the systemd test and the homelab service tests on macOS and Windows) must be
+    green before a pull request can be merged. Repository admins may push directly.
 - **Immutable releases:** once published, a release's files can't be replaced or deleted.
   goreleaser creates the release as a draft, uploads everything, then publishes it.
 - **Actions:** the default workflow token is read-only and can't approve pull requests.
