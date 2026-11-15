@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/notify"
 )
 
@@ -100,6 +101,7 @@ func (b *bot) setCommands(ctx context.Context) {
 		{"command": "revoke", "description": "revoke an open invite"},
 		{"command": "list", "description": "enrolled devices"},
 		{"command": "remove", "description": "remove a device"},
+		{"command": "requests", "description": "let new devices ask to join: on [1h] | off"},
 		{"command": "status", "description": "homelab status"},
 		{"command": "help", "description": "what this bot does"},
 	}
@@ -135,6 +137,7 @@ func (b *bot) help() string {
 /revoke &lt;name&gt; – revoke an open invite
 /list – enrolled devices
 /remove &lt;name&gt; – remove a device (asks first)
+/requests on [1h] | off – let new devices ask to join (tap to approve)
 /status – homelab status`, esc(b.d.cfg.Name), int(botInviteTTL.Minutes()))
 }
 
@@ -188,13 +191,15 @@ func (b *bot) onMessage(ctx context.Context, m *notify.TMessage) {
 		}
 	case "/status":
 		b.status(ctx)
+	case "/requests":
+		b.requests(ctx, args)
 	default:
 		b.send(ctx, "Unknown command.\n\n"+b.help(), nil)
 	}
 }
 
 func (b *bot) invite(ctx context.Context, name string) {
-	res, err := b.d.createInvite(ctx, name, botInviteTTL, b.ch.Name)
+	res, err := b.d.createInvite(ctx, name, botInviteTTL, b.ch.Name, false)
 	if err != nil {
 		b.send(ctx, "Could not create the invite: "+esc(err.Error()), nil)
 		return
@@ -211,6 +216,16 @@ Tap the line to copy it, then run it on the new device. Telegram can read this c
 		return
 	}
 	b.d.setInviteMessage(name, id)
+}
+
+// postReenroll posts a re-enroll invite (from `homelab move`) to the chat.
+func (b *bot) postReenroll(ctx context.Context, inv Invite, code string) int64 {
+	return b.send(ctx, fmt.Sprintf(`Re-enroll invite for <b>%s</b> (the homelab moved to relay %s), one use, valid until %s:
+
+<code>catflap enroll %s</code>
+
+Run it on that device. This message goes away once it's used or expired.`,
+		esc(inv.Name), esc(b.d.cfg.Relay), when(inv.Expires), esc(code)), nil)
 }
 
 // inviteUsed replaces the code with a note once a device enrolled.
@@ -327,6 +342,10 @@ func (b *bot) onCallback(ctx context.Context, cb *notify.TCallback) {
 		return
 	}
 	kind, nonce, _ := strings.Cut(cb.Data, ":")
+	if kind == "ra" || kind == "rd" { // enrollment request: approve / deny
+		b.onRequestButton(ctx, cb, kind == "ra", nonce, answer)
+		return
+	}
 	b.mu.Lock()
 	p, ok := b.pending[nonce]
 	delete(b.pending, nonce)
@@ -359,6 +378,87 @@ func (b *bot) onCallback(ctx context.Context, cb *notify.TCallback) {
 	default:
 		answer("")
 	}
+}
+
+// requests handles /requests [on [duration] | off].
+func (b *bot) requests(ctx context.Context, args []string) {
+	switch {
+	case len(args) == 0:
+		info := b.d.requestsInfo()
+		s := "Enrollment requests are <b>off</b>. Open them with /requests on (1 hour) or /requests on 30m."
+		if time.Now().Before(info.Until) {
+			s = fmt.Sprintf("Enrollment requests are <b>open</b> until %s. New devices can run:\n<code>catflap enroll --request %s@%s</code>\nClose with /requests off.", when(info.Until), esc(b.d.cfg.Name), esc(b.d.cfg.Relay))
+		}
+		for _, p := range info.Pending {
+			s += fmt.Sprintf("\n• %s from %s", esc(p.Name), esc(p.Source))
+		}
+		b.send(ctx, s, nil)
+	case args[0] == "off":
+		if _, err := b.d.setRequestWindow(ctx, 0, b.ch.Name); err != nil {
+			b.send(ctx, esc(err.Error()), nil)
+			return
+		}
+		b.send(ctx, "Enrollment requests are closed.", nil)
+	case args[0] == "on":
+		dur := DefaultRequestWindow
+		if len(args) > 1 {
+			v, err := time.ParseDuration(args[1])
+			if err != nil || v <= 0 || v > 7*24*time.Hour {
+				b.send(ctx, "Usage: <code>/requests on 30m</code> (up to 168h)", nil)
+				return
+			}
+			dur = v
+		}
+		until, err := b.d.setRequestWindow(ctx, dur, b.ch.Name)
+		if err != nil {
+			b.send(ctx, esc(err.Error()), nil)
+			return
+		}
+		b.send(ctx, fmt.Sprintf("Enrollment requests are open until %s. On the new device run:\n<code>catflap enroll --request %s@%s</code>\nYou'll get a message here to approve it.", when(until), esc(b.d.cfg.Name), esc(b.d.cfg.Relay)), nil)
+	default:
+		b.send(ctx, "Usage: <code>/requests</code>, <code>/requests on [30m]</code> or <code>/requests off</code>", nil)
+	}
+}
+
+// postRequest asks the user to approve a request; returns the message id.
+func (b *bot) postRequest(ctx context.Context, p *pendingRequest) int64 {
+	host := ""
+	if p.hostname != "" {
+		host = " (hostname " + esc(p.hostname) + ")"
+	}
+	return b.send(ctx, fmt.Sprintf("<b>%s</b>%s from %s asks to join homelab %s.\n\nCode: <b>%s</b>\n\nApprove only if the new device shows exactly this code.",
+		esc(p.Req.Name), host, esc(p.Source), esc(b.d.cfg.Name), codes.FormatPairingCode(p.Code)),
+		&notify.Keyboard{Rows: [][]notify.Button{{
+			{Text: "Approve " + p.Req.Name, Data: "ra:" + p.ID},
+			{Text: "Deny", Data: "rd:" + p.ID},
+		}}})
+}
+
+func (b *bot) onRequestButton(ctx context.Context, cb *notify.TCallback, approve bool, id string, answer func(string)) {
+	var name string
+	var err error
+	if approve {
+		name, err = b.d.approveRequest(ctx, id, b.ch.Name)
+	} else {
+		name, err = b.d.denyRequest(ctx, id, b.ch.Name)
+	}
+	if err != nil {
+		answer("Failed")
+		b.edit(ctx, cb.Message.MessageID, esc(err.Error()))
+		return
+	}
+	if approve {
+		answer("Approved " + name)
+	} else {
+		answer("Denied")
+	}
+}
+
+// requestDecided replaces the request message (approved, denied, expired).
+func (b *bot) requestDecided(msg int64, text string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	b.edit(ctx, msg, text)
 }
 
 // stranger alerts (once per sender per hour) about someone else using the bot.

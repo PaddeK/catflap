@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"sort"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/client"
+	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/fsutil"
 	"github.com/PaddeK/catflap/internal/homelab"
 	"github.com/PaddeK/catflap/internal/relay"
@@ -36,15 +38,21 @@ Setup (once per machine):
   catflap setup relay --hostname derp.example.com     on the VPS (as root)
   catflap setup homelab --join <join-code>            on the homelab
   catflap enroll <invite>                             on each client
+  catflap enroll --request HOMELAB             ... or without invite: tap to approve
 
 Homelab administration:
   catflap invite <name> [--ttl 15m]    create a one-time invite for a device
+                                       (--replace: re-enroll an existing device)
   catflap invites [--revoke <name>]    list or revoke open invites
   catflap list                         list enrolled devices
+  catflap requests [on [--for 1h] | off]   let new devices ask to join (tap to approve)
+  catflap approve|deny <code>          decide a pending request
   catflap remove <name>                remove a device (takes effect immediately)
   catflap forward add <port>[=host:port]   make a port reachable through the tunnel
   catflap forward remove <port>        close it again (cuts open connections)
   catflap forward list                 show reachable ports (default: 22 only)
+  catflap homelab move --join <code>   move to another relay (new hostname/port);
+                                       prints a re-enroll invite per device
   catflap notify add telegram|ntfy|pushover|command
                                        security alerts on your phone; Telegram adds
                                        the invite bot (/invite, /list, /remove)
@@ -110,6 +118,9 @@ func run(ctx context.Context, args []string) error {
 	case "relay":
 		return cmdRelay(ctx, args)
 	case "homelab":
+		if len(args) > 0 && args[0] == "move" {
+			return cmdHomelabMove(ctx, args[1:])
+		}
 		if len(args) > 0 && args[0] == "run" {
 			p, err := homelab.DefaultPaths()
 			if err != nil {
@@ -117,7 +128,7 @@ func run(ctx context.Context, args []string) error {
 			}
 			return homelab.Run(ctx, p)
 		}
-		return errors.New("usage: catflap homelab run")
+		return errors.New("usage: catflap homelab run|move")
 	case "invite":
 		return cmdInvite(ctx, args)
 	case "invites":
@@ -139,6 +150,10 @@ func run(ctx context.Context, args []string) error {
 		return cmdForward(ctx, args)
 	case "notify":
 		return cmdNotify(ctx, args)
+	case "requests":
+		return cmdRequests(ctx, args)
+	case "approve", "deny":
+		return cmdDecide(ctx, cmd, args)
 	case "forget":
 		return cmdForget(args)
 	case "status":
@@ -498,19 +513,20 @@ func ctlErr(err error) error {
 func cmdInvite(ctx context.Context, args []string) error {
 	fs := newFlags("invite")
 	ttl := fs.Duration("ttl", 15*time.Minute, "how long the invite stays valid (max 2160h)")
+	replace := fs.Bool("replace", false, "re-enroll an existing device: its old entry and SSH key are replaced")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: catflap invite <device-name> [--ttl 15m]")
+		return errors.New("usage: catflap invite <device-name> [--ttl 15m] [--replace]")
 	}
 	c, err := control()
 	if err != nil {
 		return err
 	}
 	var res homelab.InviteResult
-	if err := c.Do(ctx, "POST", "/invite", map[string]any{"name": pos[0], "ttl": *ttl}, &res); err != nil {
+	if err := c.Do(ctx, "POST", "/invite", map[string]any{"name": pos[0], "ttl": *ttl, "replace": *replace}, &res); err != nil {
 		return ctlErr(err)
 	}
 	fmt.Printf(`Invite for %q (one use, valid until %s):
@@ -713,14 +729,20 @@ func cmdEnroll(ctx context.Context, args []string) error {
 	fs.StringVar(&o.SSHKeyFile, "ssh-key", "", "SSH public key (.pub) to authorize (default: ~/.ssh/id_ed25519.pub or a new key)")
 	fs.BoolVar(&o.NoSSHKey, "no-ssh-key", false, "don't send an SSH key")
 	fs.BoolVar(&o.NoSSHConfig, "no-ssh-config", false, "don't write ~/.ssh/config")
+	fs.StringVar(&o.Request, "request", "", "no invite: ask HOMELAB to approve this device (tap to approve)")
+	fs.StringVar(&o.Name, "name", "", "device name to ask for, with --request (default: from the hostname)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(pos) != 1 {
-		return errors.New("usage: catflap enroll <invite> [--alias NAME] [--ssh-key FILE.pub]")
+	switch {
+	case o.Request != "" && len(pos) == 0:
+	case o.Request == "" && len(pos) == 1 && o.Name == "":
+		o.Invite = pos[0]
+	default:
+		return errors.New("usage: catflap enroll <invite> [--alias NAME] [--ssh-key FILE.pub]\n       catflap enroll --request HOMELAB [--name DEVICE] [--alias NAME]")
 	}
-	o.Invite, o.Out = pos[0], os.Stdout
+	o.Out = os.Stdout
 	return client.Enroll(ctx, o)
 }
 
@@ -796,6 +818,164 @@ func cmdStatus(ctx context.Context) error {
 	}
 	if !found {
 		fmt.Println("nothing set up on this machine yet (see `catflap help`)")
+	}
+	return nil
+}
+
+// cmdHomelabMove moves the homelab to another relay (new hostname or port).
+func cmdHomelabMove(ctx context.Context, args []string) error {
+	fs := newFlags("homelab move")
+	join := fs.String("join", "", "join code from the new relay (sudo catflap relay join-code there)")
+	ttl := fs.Duration("ttl", 24*time.Hour, "how long the re-enroll invites stay valid")
+	yes := fs.Bool("yes", false, "don't ask for confirmation")
+	if _, err := parse(fs, args); err != nil {
+		return err
+	}
+	if *join == "" {
+		return errors.New("usage: catflap homelab move --join <code from the new relay> [--ttl 24h] [--yes]")
+	}
+	p, err := homelab.DefaultPaths()
+	if err != nil {
+		return err
+	}
+	info, ok := homelab.Inspect(p)
+	if !ok {
+		return errors.New("there is no homelab set up here (for this user)")
+	}
+	target, err := homelab.MoveTarget(p, *join)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("This moves homelab %q from relay %s to relay %s:\n", info.Name, info.Relay, target)
+	fmt.Println("  - registers it with the new relay (it keeps its keys and devices) and removes it from the old one")
+	fmt.Println("  - restarts the homelab")
+	if len(info.Devices) > 0 {
+		fmt.Printf("  - creates a re-enroll invite for each device, valid %s: %s\n", humanDuration(*ttl), strings.Join(info.Devices, ", "))
+		fmt.Println("Devices can't connect until they ran `catflap enroll` with their new invite.")
+	}
+	fmt.Println()
+	if !*yes && !confirm("Move the homelab?") {
+		return errors.New("cancelled, nothing was changed")
+	}
+	res, sent, err := setup.MoveHomelab(ctx, p, *join, *ttl, os.Stdout)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("==> homelab %q now uses relay %s\n", info.Name, res.NewRelay)
+	if res.OldRelayErr != nil {
+		fmt.Printf("    could not remove it from the old relay (%v);\n    there: sudo catflap relay remove %s\n", res.OldRelayErr, info.Name)
+	}
+	if os.Getenv("CATFLAP_DIR") != "" || !setupHasService() {
+		fmt.Println("    start it again with: catflap homelab run")
+	}
+	if len(res.Invites) == 0 {
+		return nil
+	}
+	fmt.Printf("\nRun on each device (one use, valid until %s; treat them like passwords):\n\n", res.Invites[0].Expires.Local().Format("2006-01-02 15:04"))
+	for _, inv := range res.Invites {
+		fmt.Printf("  %s:\n    catflap enroll %s\n", inv.Name, inv.Code)
+	}
+	if sent > 0 {
+		fmt.Printf("\nThe invites were also posted to your Telegram bot (%d).\n", sent)
+	}
+	fmt.Println("\nEach device keeps its name and ssh alias; `catflap invites` shows the ones not used yet.")
+	return nil
+}
+
+// humanDuration formats e.g. 24h as "24 hours".
+func humanDuration(d time.Duration) string {
+	switch {
+	case d%(24*time.Hour) == 0 && d >= 48*time.Hour:
+		return fmt.Sprintf("%d days", d/(24*time.Hour))
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%d hours", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d minutes", d/time.Minute)
+	}
+	return d.String()
+}
+
+// setupHasService reports whether the homelab runs as a systemd user service.
+func setupHasService() bool {
+	return exec.Command("systemctl", "--user", "cat", "catflap").Run() == nil
+}
+
+// cmdRequests shows or opens/closes the enrollment request window.
+func cmdRequests(ctx context.Context, args []string) error {
+	fs := newFlags("requests")
+	dur := fs.Duration("for", homelab.DefaultRequestWindow, "how long the window stays open (on)")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	c, err := control()
+	if err != nil {
+		return err
+	}
+	if len(pos) == 1 && (pos[0] == "on" || pos[0] == "off") {
+		d := *dur
+		if pos[0] == "off" {
+			d = 0
+		} else if d <= 0 || d > 7*24*time.Hour {
+			return errors.New("--for must be between 1s and 168h")
+		}
+		var res homelab.RequestsInfo
+		if err := c.Do(ctx, "POST", "/requests/window", map[string]any{"for": d}, &res); err != nil {
+			return ctlErr(err)
+		}
+		if d == 0 {
+			fmt.Println("enrollment requests are closed")
+			return nil
+		}
+		var s homelab.StatusInfo
+		c.Do(ctx, "GET", "/status", nil, &s)
+		fmt.Printf("Enrollment requests are open until %s. On the new device run:\n\n  catflap enroll --request %s@%s\n\nThen approve it in Telegram or here with: catflap approve <code>\n", res.Until.Local().Format("15:04"), s.Name, s.Relay)
+		return nil
+	}
+	if len(pos) != 0 {
+		return errors.New("usage: catflap requests [on [--for 1h] | off]")
+	}
+	var info homelab.RequestsInfo
+	if err := c.Do(ctx, "GET", "/requests", nil, &info); err != nil {
+		return ctlErr(err)
+	}
+	if time.Now().Before(info.Until) {
+		fmt.Printf("enrollment requests: open until %s\n", info.Until.Local().Format("2006-01-02 15:04"))
+	} else {
+		fmt.Println("enrollment requests: closed (open with: catflap requests on)")
+	}
+	if len(info.Pending) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "\nNAME\tHOSTNAME\tFROM\tCODE\tASKED")
+	for _, p := range info.Pending {
+		code := "(waiting)"
+		if p.Code != "" {
+			code = codes.FormatPairingCode(p.Code)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.Name, p.Hostname, p.Source, code, p.Received.Local().Format("15:04:05"))
+	}
+	return tw.Flush()
+}
+
+// cmdDecide approves or denies an enrollment request by code or name.
+func cmdDecide(ctx context.Context, action string, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: catflap %s <code or device name>", action)
+	}
+	c, err := control()
+	if err != nil {
+		return err
+	}
+	var res struct{ Name string }
+	if err := c.Do(ctx, "POST", "/requests/"+action, map[string]string{"code": args[0]}, &res); err != nil {
+		return ctlErr(err)
+	}
+	if action == "approve" {
+		fmt.Printf("approved %q: the device is enrolled\n", res.Name)
+	} else {
+		fmt.Printf("denied the request from %q\n", res.Name)
 	}
 	return nil
 }

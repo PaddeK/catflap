@@ -48,6 +48,10 @@ type Daemon struct {
 	ncfg     notify.Config
 	bot      *bot // Telegram invite bot, if a channel runs it
 	botStop  context.CancelFunc
+
+	reqMu    sync.Mutex
+	reqs     map[string]*pendingRequest // enrollment requests (tap to approve)
+	reqUntil time.Time                  // request window open until
 }
 
 // Run starts the homelab daemon and blocks until ctx is done.
@@ -72,6 +76,7 @@ func Run(ctx context.Context, p Paths) error {
 		wake:  make(chan struct{}, 1),
 	}
 	d.disp = notify.NewDispatcher(d.logf)
+	d.reqs = map[string]*pendingRequest{}
 	defer d.disp.Close()
 	for _, dev := range st.Devices {
 		var k key.NodePublic
@@ -186,6 +191,7 @@ func (d *Daemon) nudge() {
 
 func (d *Daemon) agentLoop(ctx context.Context) {
 	d.registerOpenInvites(ctx)
+	d.announceWindow(ctx) // after a restart the window is closed
 	d.mu.Lock()
 	d.st.NeedsSync = true // reconcile with the relay at every start
 	d.mu.Unlock()
@@ -195,6 +201,7 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 	alerted := false
 	for ctx.Err() == nil {
 		d.pruneInvites()
+		d.pruneRequests()
 		d.mu.Lock()
 		needSync := d.st.NeedsSync
 		d.mu.Unlock()
@@ -238,11 +245,15 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 			d.st.NeedsSync = true
 			d.mu.Unlock()
 			d.registerOpenInvites(ctx)
+			d.announceWindow(ctx)
 		}
 		down, alerted = time.Time{}, false
 		backoff = time.Second
 		for _, s := range ev.Submissions {
 			d.handleSubmission(ctx, s)
+		}
+		for _, rq := range ev.Requests {
+			d.handleRequest(ctx, rq)
 		}
 	}
 }
@@ -372,12 +383,15 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 			return
 		}
 	}
-	for _, dev := range d.st.Devices {
+	replaced := -1 // index of the device a re-enroll invite replaces
+	for i, dev := range d.st.Devices {
 		switch {
 		case dev.NodeKey == nk.String():
 			d.mu.Unlock()
 			d.reject(ctx, s, fmt.Sprintf("this device is already enrolled as %q", dev.Name), false)
 			return
+		case dev.Name == inv.Name && inv.Replace:
+			replaced = i
 		case dev.Name == inv.Name:
 			d.mu.Unlock()
 			d.reject(ctx, s, fmt.Sprintf("a device named %q exists already", inv.Name), true)
@@ -386,6 +400,15 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 	}
 
 	// Gate 3 first: if writing authorized_keys fails, nothing else changed.
+	// A re-enrollment drops the old device's line first.
+	if path, ok := d.cfg.authorizedKeysPath(); ok && replaced >= 0 {
+		if _, err := removeAuthorizedKey(path, inv.Name); err != nil {
+			d.mu.Unlock()
+			d.logf("enroll: authorized_keys: %v", err)
+			d.reject(ctx, s, "homelab could not update the SSH keys", false)
+			return
+		}
+	}
 	if path, ok := d.cfg.authorizedKeysPath(); ok && sshKey != "" {
 		if err := addAuthorizedKey(path, sshKey, inv.Name, !d.cfg.AllowSSHKeysFromAnywhere); err != nil {
 			d.mu.Unlock()
@@ -394,7 +417,14 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 			return
 		}
 	}
-	// Gate 2: live allowlist.
+	// Gate 2: live allowlist. A replaced device loses its old key.
+	var oldKey key.NodePublic
+	if replaced >= 0 {
+		oldKey.UnmarshalText([]byte(d.st.Devices[replaced].NodeKey))
+		d.allow.Remove(oldKey)
+		d.st.Devices = slices.Delete(d.st.Devices, replaced, replaced+1)
+		d.st.NeedsSync = true // the relay drops the old key too
+	}
 	d.st.Devices = append(d.st.Devices, Device{Name: inv.Name, NodeKey: nk.String(), SSHKey: sshKey, Hostname: sanitize(r.Hostname), Added: time.Now()})
 	d.allow.Add(nk)
 
@@ -411,12 +441,20 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 		d.logf("enroll: saving state: %v", err)
 	}
 	d.mu.Unlock()
+	if !oldKey.IsZero() {
+		d.srv.DisconnectClient(oldKey)
+		d.nudge()
+	}
 	d.logf("enroll: added device %q (%s, from %s)", inv.Name, nk.ShortString(), s.Source)
 	host := ""
 	if h := sanitize(r.Hostname); h != "" {
 		host = " (hostname " + h + ")"
 	}
-	d.alert(notify.Message{Event: "device.enrolled", Title: "new device: " + inv.Name, Priority: notify.High,
+	title := "new device: " + inv.Name
+	if replaced >= 0 {
+		title = "device re-enrolled: " + inv.Name
+	}
+	d.alert(notify.Message{Event: "device.enrolled", Title: title, Priority: notify.High,
 		Body: fmt.Sprintf("%s%s enrolled from %s. If that wasn't you, remove it: %s", inv.Name, host, s.Source, d.removeHint(inv.Name))}, "")
 	if inv.TelegramMessage != 0 {
 		if b := d.currentBot(); b != nil {
@@ -506,14 +544,15 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /invite", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Name string        `json:"name"`
-			TTL  time.Duration `json:"ttl"`
+			Name    string        `json:"name"`
+			TTL     time.Duration `json:"ttl"`
+			Replace bool          `json:"replace"`
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil {
 			ctlErr(w, http.StatusBadRequest, "bad request")
 			return
 		}
-		res, err := d.createInvite(r.Context(), req.Name, req.TTL, "")
+		res, err := d.createInvite(r.Context(), req.Name, req.TTL, "", req.Replace)
 		if err != nil {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -537,6 +576,28 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 			return
 		}
 		ctlJSON(w, struct{}{})
+	})
+	// Post open re-enroll invites (from `homelab move`) to the Telegram bot.
+	mux.HandleFunc("POST /invites/telegram", func(w http.ResponseWriter, r *http.Request) {
+		sent := 0
+		if b := d.currentBot(); b != nil {
+			d.mu.Lock()
+			var todo []Invite
+			for _, inv := range d.st.Invites {
+				if inv.Replace && inv.Used == nil && inv.TelegramMessage == 0 && time.Now().Before(inv.Expires) {
+					todo = append(todo, inv)
+				}
+			}
+			d.mu.Unlock()
+			for _, inv := range todo {
+				code := codes.Code{Kind: codes.KindInvite, ID: inv.ID, Secret: inv.Secret, Relay: d.cfg.Relay}.String()
+				if id := b.postReenroll(r.Context(), inv, code); id != 0 {
+					d.setInviteMessage(inv.Name, id)
+					sent++
+				}
+			}
+		}
+		ctlJSON(w, map[string]int{"sent": sent})
 	})
 	mux.HandleFunc("GET /devices", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
@@ -602,6 +663,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		ctlJSON(w, struct{}{})
 	})
 	d.notifyRoutes(ctx, mux)
+	d.requestRoutes(mux)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -614,7 +676,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 
 // createInvite makes a one-time invite. origin is the channel the request
 // came from ("" = command line).
-func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duration, origin string) (InviteResult, error) {
+func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duration, origin string, replace bool) (InviteResult, error) {
 	if !ValidName(name) {
 		return InviteResult{}, fmt.Errorf("invalid name %q: use lowercase letters, digits, '.', '-' or '_'", name)
 	}
@@ -625,11 +687,14 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 		return InviteResult{}, errors.New("ttl is limited to 90 days")
 	}
 	d.mu.Lock()
-	for _, dev := range d.st.Devices {
-		if dev.Name == name {
-			d.mu.Unlock()
-			return InviteResult{}, fmt.Errorf("a device named %q exists already (remove it first)", name)
-		}
+	exists := slices.ContainsFunc(d.st.Devices, func(dev Device) bool { return dev.Name == name })
+	switch {
+	case exists && !replace:
+		d.mu.Unlock()
+		return InviteResult{}, fmt.Errorf("a device named %q exists already (remove it first, or create a re-enroll invite with --replace)", name)
+	case !exists && replace:
+		d.mu.Unlock()
+		return InviteResult{}, fmt.Errorf("there is no device named %q to replace", name)
 	}
 	for _, inv := range d.st.Invites {
 		if inv.Name == name && time.Now().Before(inv.Expires) {
@@ -649,13 +714,17 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.st.Invites = append(d.st.Invites, Invite{ID: c.ID, Name: name, Secret: c.Secret, Created: time.Now(), Expires: exp})
+	d.st.Invites = append(d.st.Invites, Invite{ID: c.ID, Name: name, Secret: c.Secret, Created: time.Now(), Expires: exp, Replace: replace})
 	if err := d.saveLocked(); err != nil {
 		return InviteResult{}, err
 	}
 	d.logf("invite: created for %q, valid until %s", name, exp.Format(time.RFC3339))
+	kind := "One-time invite"
+	if replace {
+		kind = "Re-enroll invite (replaces the existing device)"
+	}
 	d.alert(notify.Message{Event: "invite.created", Title: "invite created for " + name,
-		Body: fmt.Sprintf("One-time invite for %q created %s, valid until %s.", name, via(origin), when(exp))}, origin)
+		Body: fmt.Sprintf("%s for %q created %s, valid until %s.", kind, name, via(origin), when(exp))}, origin)
 	return InviteResult{Code: c.String(), Name: name, Expires: exp}, nil
 }
 

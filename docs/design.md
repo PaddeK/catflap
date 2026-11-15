@@ -119,9 +119,26 @@ The prototype's lesson: the notification is easy, **the way back is hard**. Its 
   - **What Telegram sees:** bot chats aren't end-to-end encrypted, so Telegram can read the invite. It works once, for 15 minutes, and is deleted after use. A Telegram account takeover could mint invites, which is why the alerts on your other channels matter: configure ntfy or Pushover too, and you see every invite and enrollment there.
   - Nothing changes on the relay or the clients.
 
-### Tap-to-approve enrollment (later, flow A)
+### Re-enrolling and moving to another relay
 
-Same need, phone UX without copying a code: the laptop runs `catflap enroll --request <homelab>@relay.example.com`, your phone shows "laptop wants to join, code 482913 [Approve]" through any channel above, and the Approve link goes to the relay (the relay stores only the token's hash; the homelab learns of the approval by polling the relay). The client and the homelab each compute the **pairing code** from the keys. It needs a public request endpoint on the relay with rate limits, so it comes after the invite bot has proven itself; off by default.
+- **Re-enroll invites** (`invite --replace`): an invite flagged `replace` may enroll a device under the name of an existing one. On approval the homelab removes the old device's `authorized_keys` line, its key from the allowlist (and disconnects it), adds the new device under the same name, and syncs the relay (which drops the old key). A plain invite for an existing name is still refused.
+- **`homelab move --join CODE`** (new relay hostname or port; a same-hostname move is a relay backup/restore instead): the homelab's tailcat address contains the relay's DERP region (host and port), so every client needs a new address. With the service stopped, the homelab registers with the new relay **with its existing node key**, creates one re-enroll invite per device (registered at the new relay; default 24 h), switches `homelab.json` (only its `relay` key) and its state (new agent token, old open invites dropped), de-registers from the old relay and starts again; the bot posts the invites if it runs. If registering the invites fails, the new relay record is removed and nothing changed locally. It refuses to run through a catflap session, which the restart would end before the invites are shown.
+- Clients need nothing new: `enroll` with an existing alias replaces the entry (new key, new address, ssh config block rewritten).
+
+### Tap-to-approve enrollment (enrollment requests)
+
+No invite: `catflap enroll --request HOMELAB@RELAY [--name N]`, the user compares a 6-digit pairing code and approves.
+
+- **Request window.** Off by default. `catflap requests on [--for 1h]` or `/requests on [1h]` opens it (max 7 days); the homelab tells the relay (`POST /v1/agent/requests {until}`), which refuses requests outside it. A restarted homelab closes it (announced at start and after outages).
+- **Approval only in Telegram (inline buttons, the bot's one chat) or with `catflap approve CODE` on the homelab.** Never through the relay, ntfy or Pushover: approval links would turn "can read the notification" into "can add a device" (the prototype's weakness). All channels still get the request with its code.
+- **Protocol** (the relay passes everything, decides nothing):
+  1. Device → relay `POST /v1/request {homelab, name, nodekey, boxkey, ssh_key, hostname, commit}`; `commit = SHA-256("catflap-request-commit-v1\n" + reveal)` over a random 32-byte secret; `boxkey` is a fresh X25519 key. The relay answers with an id and the homelab's node key as it knows it.
+  2. Homelab (event `new`): validates (name free, keys well-formed), answers with a random 32-byte nonce.
+  3. Device: fetches the nonce, then reveals its secret (`POST /v1/request/{id}/reveal`; the relay and the homelab check it against the commit).
+  4. Both compute the **pairing code**: SHA-256 over length-prefixed fields (homelab key, homelab name, device name, node key, box key, SSH key, hostname), the secret and the nonce, reduced to 6 digits. The device prints it; the homelab shows it in Telegram (with Approve/Deny) and in alerts.
+  5. On approval the homelab adds the device (gates 3 and 2, as for invites), seals `{name, address, ssh user}` to the box key (NaCl sealed box) and posts it with the approval; the relay admits the node key (gate 1). The device opens the reply and checks that the address's server key is the homelab key that went into the code.
+- **Why commit-then-reveal:** without it, a relay in the middle could see the device's keys and grind its own until the 6-digit code matches (a million tries take seconds). Here it must commit before it sees the homelab's nonce, so each attempt matches with probability 10⁻⁶, and a failed one shows the user a wrong code.
+- Limits: requests live in the relay's memory for 10 minutes (decided ones 5 more for the device to fetch), at most 3 open per homelab, 10 per hour per IP.
 
 ### Removal
 
@@ -151,7 +168,10 @@ catflap relay status
 
 catflap setup homelab --join CODE [--name N] [--forward PORT[=HOST:PORT]]...
 catflap homelab run                     # systemd user service entry point
-catflap invite NAME [--ttl 15m]
+catflap homelab move --join CODE [--ttl 24h]   # to another relay (new hostname/port), re-enroll invites
+catflap invite NAME [--ttl 15m] [--replace]   # --replace: re-enroll an existing device
+catflap requests [on [--for 1h] | off]  # request window (tap to approve)
+catflap approve|deny CODE               # decide a pending request
 catflap invites [--revoke ID]
 catflap list
 catflap remove NAME
@@ -165,6 +185,7 @@ catflap uninstall [relay|homelab|client] [--yes] [--keep-binary]   # shows a pla
 sudo catflap relay remove HOMELAB       # forget a homelab that's gone without uninstall
 
 catflap enroll INVITE [--alias homelab] [--ssh-key FILE.pub] [--no-ssh-config]
+catflap enroll --request HOMELAB@RELAY [--name DEVICE] [...]   # no invite: tap to approve
 catflap proxy ALIAS [PORT]              # ssh ProxyCommand: stdio <-> homelab port (default 22)
 catflap forward ALIAS [LOCAL:]PORT      # localhost:LOCAL <-> forwarded homelab port (e.g. Node-RED)
 catflap forget ALIAS
@@ -176,7 +197,7 @@ catflap version
 
 - Port 443: TLS (Let's Encrypt via autocert, TLS-ALPN-01 or HTTP-01; or a manual cert). Routes:
   - `/derp` (+ WebSocket), `/derp/probe`, `/derp/latency-check`, `/generate_204` (as derper)
-  - `/v1/enroll…` (public, rate-limited), `/v1/agent/…` (agent token)
+  - `/v1/enroll…`, `/v1/request…` (public, rate-limited), `/v1/agent/…` (agent token)
   - `/` blank page
 - Port 80 (optional): ACME HTTP-01 + redirect. UDP 3478 (optional): STUN.
 - Admission: derpserver only supports a URL hook, so catflap serves it on an in-process loopback listener, **fail closed**.
@@ -257,11 +278,13 @@ Details and the release checklist: [releasing.md](releasing.md).
   - the client agent: two sessions at once both keep working, a reconnect right after a session is fast, the no-agent fallback works, devices recover after a homelab restart
   - forwards: a port is unreachable until `forward add`, the client `forward` listener reaches it, `forward remove` cuts an open connection and blocks new ones, forwards survive a restart
   - one client enrolled in two homelabs on the same relay: each enrollment has its own key, sessions to both at once keep working; a client from before v0.3 (one shared key) still works
+  - moving a homelab to a second relay: refused while the daemon runs or for the same relay, the homelab leaves the old relay and registers with the new one, the device re-enrolls with its printed invite (replaced, not added twice), the client entry points to the new relay and the tunnel works through it; `invite --replace` re-enrolls an existing device, a plain invite for an existing name is refused
   - uninstall and relay remove: `setup --force` replaces its relay record, `relay remove` asks first, client and homelab uninstall remove what they set up (homelab: also from the relay and `authorized_keys`), refuse while the daemon runs
+  - enrollment requests: refused while the window is closed, the device and `catflap requests` show the same code, Telegram gets it with buttons and the other channels with the code, a wrong code approves nothing, `catflap approve` and the Telegram buttons (approve, deny) work and the approved device has a tunnel, a taken name is refused, `/requests on|off` in Telegram
   - notifications, against fake Telegram/ntfy services (`tests/fakeservices.py`): a channel only goes live after its test message, Telegram links only the chat that sent the one-time code, the token is never shown, `/invite` gives a working invite and the message is edited once used, alerts go to the other channels (not echoed to Telegram), a stranger gets nothing and triggers an alert, a tampered enrollment triggers an alert, `/remove` with its confirm button removes the device
 - **Install tests** (`tests/install.sh`, `tests/install.ps1`): the install scripts against a goreleaser snapshot served on localhost: install, upgrade over a running catflap (Windows: locked exe moved aside, cleaned up later), tampered binary and missing checksum refused (existing file untouched), missing release; Windows also checks the PATH entry and its registry type, and restores your PATH afterwards.
 - **Docker platform test** (`tests/docker.sh`, local, needs Docker with arm64 emulation): `install.sh` on Alpine (busybox wget), Debian (wget / no downloader), Ubuntu and Fedora, amd64, arm64 and 32-bit ARM (v6, v7), as root and as a normal user, checking the right binary was picked; then the end-to-end test with the amd64, arm64, ARMv7 (Debian) and ARMv6 (Alpine) release binaries (`CATFLAP_BIN`). Emulation doesn't enforce ARMv6-only instructions; `GOARM=6` does.
-- **systemd test** (`tests/systemd.sh`, Docker with a privileged container running systemd): `setup relay` and `setup homelab` as real services, `restart` of both, a client as a second user, then moving the relay (backup, wipe, `--restore`: homelab and client reconnect by themselves, and a device enrolled after the backup is re-sent by the homelab), then `uninstall` of all three roles: services, files, the relay's system user and the binaries are gone, and the homelab removed itself from the relay.
+- **systemd test** (`tests/systemd.sh`, Docker with a privileged container running systemd): `setup relay` and `setup homelab` as real services, `restart` of both, a client as a second user, then moving the relay (backup, wipe, `--restore`: homelab and client reconnect by themselves, and a device enrolled after the backup is re-sent by the homelab), then `homelab move` to a second relay with a new hostname (service stopped and started, the client re-enrolls, its device entry and SSH key are replaced), then `uninstall` of all three roles: services, files, the relay's system user and the binaries are gone, and the homelab removed itself from the relay.
 - CI (`.github/workflows/ci.yml`): `go vet`, unit tests and the end-to-end test on amd64 and native arm64 runners; a release dry run (goreleaser snapshot of all six targets) with the install tests on Linux, macOS and Windows (PowerShell 5.1 and 7), plus shellcheck.
 
 ## Milestones
@@ -271,4 +294,5 @@ Details and the release checklist: [releasing.md](releasing.md).
 3. **Docs:** user guides: getting started, daily use, troubleshooting, security. *(done)*
 4. **v0.2:** notifications (ntfy, Pushover, Telegram, command) and the Telegram invite bot, `catflap restart`.
 5. **v0.3:** `catflap uninstall`, `relay remove`, relay backup/restore (moving the relay), one key per enrollment.
-6. **Later:** moving the relay to a new hostname, tap-to-approve enrollment (flow A), macOS homelab (launchd).
+6. **v0.4:** `homelab move` (relay with a new hostname/port), re-enroll invites (`invite --replace`), tap-to-approve enrollment requests.
+7. **Later:** macOS homelab (launchd).

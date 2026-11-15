@@ -73,7 +73,8 @@ catflap notify add ntfy                             # optional second channel fo
   (plus UDP for direct paths when available).
 - **Invites, not side channels.** The invite secret never reaches the relay. The homelab checks a
   MAC over the device's keys and answers with an encrypted reply. A compromised relay can't add
-  devices or read your homelab's address.
+  devices or read your homelab's address. No invite at hand? A new device can ask, and you
+  approve it with a tap in Telegram after comparing a 6-digit code.
 - **Only what you forward.** Port 22 by default; `catflap forward add` opens more, live. Every
   other port is refused.
 - **Know what happens.** Every enrollment, removal and invite, and every failed enrollment,

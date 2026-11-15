@@ -6,6 +6,7 @@ homelab as your normal user; *client* commands run on the device you connect fro
 - [Devices](#devices)
 - [More ports (forwards)](#more-ports-forwards)
 - [Alerts on your phone and the Telegram bot](#alerts-on-your-phone-and-the-telegram-bot)
+- [Approve a new device from your phone (no invite)](#approve-a-new-device-from-your-phone-no-invite)
 - [Several homelabs](#several-homelabs)
 - [Upgrading](#upgrading)
 - [What to back up](#what-to-back-up)
@@ -17,6 +18,7 @@ homelab as your normal user; *client* commands run on the device you connect fro
 | Task | Command |
 |---|---|
 | invite a device (*homelab*) | `catflap invite NAME` (valid 15 min, one use; `--ttl 2h` for longer) |
+| re-enroll an existing device (*homelab*) | `catflap invite NAME --replace` |
 | show open invites (*homelab*) | `catflap invites` |
 | revoke an open invite (*homelab*) | `catflap invites --revoke NAME` |
 | enroll (*client*) | `catflap enroll cfi1-…` |
@@ -32,8 +34,11 @@ only removes the local entry; the homelab still lists the device until you remov
 **Lost or stolen device:** remove it right away, from the homelab or from your phone (`/remove`,
 see [the Telegram bot](#the-telegram-invite-bot)). See also [Security](security.md#if-something-is-lost).
 
-**Device names** are lowercase letters, digits, `.`, `-` and `_`. To enroll a device again
-(e.g. after reinstalling it), remove the old entry first, then invite it again.
+**Device names** are lowercase letters, digits, `.`, `-` and `_`.
+
+**Enrolling a device again** (e.g. after reinstalling it): `catflap invite NAME --replace` creates
+a re-enroll invite. When the device enrolls with it, its old entry and old SSH key are replaced;
+name and ssh alias stay the same.
 
 **Enroll options** (*client*):
 - `--alias NAME`: use another SSH alias than the homelab's name (e.g. for two homelabs).
@@ -113,6 +118,7 @@ your chat (and only yours) to the homelab. Answer "yes" to run the bot. Then, in
 | `/revoke NAME` | revoke an open invite |
 | `/list` | enrolled devices |
 | `/remove NAME` | remove a device (asks you to confirm) |
+| `/requests on [30m]` / `off` | let new devices ask to join, see [below](#approve-a-new-device-from-your-phone-no-invite) |
 | `/status` | homelab status |
 
 So with only your phone at hand you can let a new laptop in, or lock out a stolen one.
@@ -122,6 +128,39 @@ So with only your phone at hand you can let a new laptop in, or lock out a stole
 - Commands sent while the homelab was offline aren't executed later; the bot tells you.
 - Telegram can read bot chats (they aren't end-to-end encrypted). That's why bot invites are
   short-lived and deleted after use. See [Security](security.md#who-can-see-or-do-what).
+
+## Approve a new device from your phone (no invite)
+
+Instead of copying an invite to the new device, the device asks to join and you approve it with
+a tap. It's off until you open a **request window**, so nobody can bother you with requests the
+rest of the time:
+
+1. Open the window: `/requests on` in the Telegram bot, or `catflap requests on` on the homelab.
+   It closes by itself after 1 hour (`/requests on 30m`, `catflap requests on --for 30m`).
+2. On the new device:
+
+   ```sh
+   catflap enroll --request homelab@relay.example.com          # HOMELAB@RELAY
+   ```
+
+   It shows a 6-digit code, e.g. `731 773`. The device name defaults to its hostname; choose
+   another with `--name laptop`.
+3. Your Telegram bot shows the request with the same code and **Approve** / **Deny** buttons.
+   Compare the codes, then tap **Approve**. Without the bot: `catflap requests` on the homelab
+   lists the requests, `catflap approve 731773` (or `catflap deny …`) decides.
+4. The device is enrolled as with an invite: ssh config, tunnel check, done. Close the window
+   early with `/requests off` or `catflap requests off`.
+
+**Only approve if the codes match.** The code covers both sides' keys: if anything between the
+device and your homelab (even the relay) swapped them, the codes differ.
+
+- Approving works only in your Telegram chat or on the homelab, never through ntfy, Pushover or a
+  link: reading a notification never lets anyone in. Every request is still reported on all
+  your channels with its code.
+- A request waits up to 10 minutes. The relay allows a few requests per hour per address and
+  three at a time per homelab.
+- `enroll --request` takes the same options as an invite (`--alias`, `--ssh-key`, `--no-ssh-key`,
+  `--no-ssh-config`).
 
 ## Several homelabs
 
@@ -172,7 +211,9 @@ backup after you set up another homelab on it.
 
 ## Moving the relay to another server
 
-For a new VPS or provider, with the **same hostname**. Homelabs and devices know the relay by its
+### Same hostname
+
+For a new VPS or provider, keeping the relay's name. Homelabs and devices know the relay by its
 name, so nothing changes on them:
 
 1. On the old server: `sudo catflap relay backup relay-backup.json`, and copy the file to the new
@@ -190,8 +231,29 @@ Devices you enroll between the backup and the move aren't in the backup; the hom
 to the new relay by itself when it reconnects. A homelab set up after the backup isn't in it:
 make the backup after setting up homelabs.
 
-A **new hostname or port** isn't supported yet: set up the new relay, then each homelab with
-`catflap setup homelab --join … --force`, then enroll the devices again.
+### New hostname or port
+
+The relay's name is part of the address every device stores, so each device enrolls once more.
+The homelab keeps its keys, devices and settings:
+
+1. Set up the new relay ([Getting started](getting-started.md#2-set-up-the-relay)); keep the old
+   one running for now. It prints a join code (later ones: `sudo catflap relay join-code`).
+2. On the homelab, **directly or over your LAN** (not through catflap: the homelab restarts and
+   your session would end before you see the invites):
+
+   ```sh
+   catflap homelab move --join cfj1-…-relay.example.com
+   ```
+
+   It shows what it will do, asks, then registers the homelab with the new relay, removes it from
+   the old one, restarts it, and prints one re-enroll invite per device (valid 24 hours;
+   `--ttl 3d` for longer). With the Telegram bot set up, the invites also arrive there.
+3. On each device, run its `catflap enroll …` line. The device keeps its name and ssh alias; its
+   entry now points to the new relay.
+4. Once all devices are moved (`catflap invites` shows the unused invites), remove the old relay:
+   `sudo catflap uninstall` there.
+
+Devices can't connect between step 2 and their own step 3.
 
 ## Uninstalling
 

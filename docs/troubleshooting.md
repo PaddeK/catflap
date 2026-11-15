@@ -58,6 +58,14 @@ The DNS records may still point to the old server (`dig relay.example.com`), or 
 homelab and devices retry by themselves. Check that the new server has the same ports open, and
 `journalctl -u catflap-relay` there.
 
+**`homelab move`: "you are connected through catflap"**
+The move restarts the homelab, which would end your session before you see the new invites. Run
+it on the homelab itself or over your LAN.
+
+**After `homelab move`, a device can't connect**
+It needs its re-enroll invite: run the `catflap enroll …` line printed for it. Lost the line?
+`catflap invites --revoke NAME`, then `catflap invite NAME --replace` for a new one.
+
 ## Enrolling
 
 **"relay: unknown, used or expired invite"**
@@ -73,11 +81,28 @@ The homelab isn't running or can't reach the relay. On the homelab: `catflap sta
 `journalctl --user -u catflap`. The invite stays valid until it expires; just run `enroll` again.
 
 **"a device named … exists already"**
-Remove the old entry first (`catflap remove NAME`), or pick another name.
+To enroll that device again, use a re-enroll invite: `catflap invite NAME --replace`. Otherwise
+pick another name, or remove the old entry first (`catflap remove NAME`).
 
 **"Checking the tunnel... not reachable yet"**
 Enrollment worked, but the first connection didn't. Wait a few seconds and try `ssh homelab`. If
 it keeps failing, see the next section.
+
+**`enroll --request`: "no homelab … accepts enrollment requests right now"**
+The request window is closed (it closes by itself after an hour), or the homelab name is wrong.
+Open it: `/requests on` in the Telegram bot or `catflap requests on` on the homelab. The name is
+the homelab's (`catflap status` there), the part after `@` the relay's address.
+
+**`enroll --request`: "the name … is taken"**
+Another device already has that name. Ask again with `--name another-name`.
+
+**`enroll --request`: "the reply doesn't come from the homelab the code was made for"**
+Something between the device and the homelab tampered with the request. Nothing was saved. Don't
+retry blindly: check the relay, and use an invite instead.
+
+**No Telegram message for a request**
+Is the bot set up (`catflap notify list`)? Without it, see the request with `catflap requests`
+on the homelab and approve with `catflap approve CODE`.
 
 ## Connecting
 

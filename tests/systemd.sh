@@ -46,10 +46,10 @@ checkas() { if as "$2" "$3" > "$T/out" 2>&1; then ok "$1"; else bad "$1"; sed 's
 echo "== setup"
 docker exec "$NAME" bash -c '
 set -e
-echo "127.0.0.1 relay.test" >> /etc/hosts
+echo "127.0.0.1 relay.test relay2.test" >> /etc/hosts
 mkdir -p /opt/cert && cd /opt/cert
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=relay.test \
-  -addext subjectAltName=DNS:relay.test -keyout key.pem -out cert.pem 2>/dev/null
+  -addext subjectAltName=DNS:relay.test,DNS:relay2.test -keyout key.pem -out cert.pem 2>/dev/null
 chmod 644 key.pem   # test only: the relay service user must read it
 cp cert.pem /usr/local/share/ca-certificates/relay-test.crt && update-ca-certificates > /dev/null 2>&1
 useradd -m -s /bin/bash alice && useradd -m -s /bin/bash bob
@@ -85,6 +85,20 @@ check "the homelab reconnects and re-sends devices enrolled after the backup" "f
 checkas "the homelab works with the restored relay (invites)" alice "~/.local/bin/catflap invite after-move | grep -q cfi1-"
 checkas "the client reaches the homelab again" bob "for i in \$(seq 30); do echo | timeout 10 ~/.local/bin/catflap proxy lab 22 2>/dev/null | head -1 | grep -q SSH-2.0 && exit 0; sleep 2; done; exit 1"
 
+echo "== move the homelab to another relay (new hostname)"
+docker exec "$NAME" bash -c 'mkdir -p /opt/relay2 && cat > /opt/relay2/relay.json <<EOF
+{"hostname":"relay2.test","listen":":8443","http_port":0,"stun_port":0,"cert_mode":"manual",
+ "cert_file":"/opt/cert/cert.pem","key_file":"/opt/cert/key.pem","state_dir":"/opt/relay2/state","admin_socket":"/opt/relay2/admin.sock"}
+EOF'
+docker exec -d "$NAME" bash -c '/opt/catflap relay run --config /opt/relay2/relay.json > /tmp/relay2.log 2>&1'
+for _ in $(seq 30); do docker exec "$NAME" test -S /opt/relay2/admin.sock && break; sleep 0.5; done
+JM=$(docker exec "$NAME" /opt/catflap relay join-code --config /opt/relay2/relay.json | grep -o 'cfj1-[^ ]*')
+checkas "move: the service is stopped, switched and started again" alice "~/.local/bin/catflap homelab move --join $JM --yes > /tmp/move.log 2>&1 && grep -q \"now uses relay relay2.test:8443\" /tmp/move.log && systemctl --user is-active --quiet catflap && ~/.local/bin/catflap status | grep -q relay2.test"
+check "move: gone from the old relay, on the new one" "! catflap relay status | grep -q 'homelab \"lab\"' && /opt/catflap relay status --config /opt/relay2/relay.json | grep -q 'homelab \"lab\"'"
+RINV=$(docker exec "$NAME" grep -A1 '^  bobs-laptop:' /tmp/move.log | grep -o 'cfi1-[^ ]*' || true)
+checkas "the client re-enrolls and reaches the homelab through the new relay" bob "~/.local/bin/catflap enroll $RINV | grep -q Approved && for i in \$(seq 30); do echo | timeout 10 ~/.local/bin/catflap proxy lab 22 2>/dev/null | head -1 | grep -q SSH-2.0 && exit 0; sleep 2; done; exit 1"
+checkas "the device was replaced, and its SSH key too" alice "[ \$(~/.local/bin/catflap list | grep -c \"^bobs-laptop \") = 1 ] && [ \$(grep -c catflap:bobs-laptop ~/.ssh/authorized_keys) = 1 ]"
+
 echo "== uninstall"
 checkas "client: uninstall removes everything incl. the binary" bob "~/.local/bin/catflap uninstall --yes > /tmp/bob.log && ! grep -q \"Host lab\" ~/.ssh/config && test ! -e ~/.config/catflap && test ! -e ~/.local/bin/catflap"
 checkas "homelab: the plan mentions the relay needs root" alice "~/.local/bin/catflap uninstall < /dev/null 2>&1 | grep -q \"Not included: the relay\""
@@ -94,7 +108,7 @@ check "relay: uninstall removes service, dirs, user and binary" "catflap uninsta
 check "nothing listens on 443 anymore" "! (exec 3<>/dev/tcp/127.0.0.1/443) 2>/dev/null"
 
 if [ "$fail" -gt 0 ]; then
-	for f in bob alice root restore; do echo "--- $f log"; docker exec "$NAME" cat /tmp/$f.log 2>/dev/null || true; done
+	for f in bob alice root restore move relay2; do echo "--- $f log"; docker exec "$NAME" cat /tmp/$f.log 2>/dev/null || true; done
 	echo "--- relay setup log"; cat "$T/relay.log"
 fi
 echo

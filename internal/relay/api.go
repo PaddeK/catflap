@@ -25,17 +25,19 @@ type apiServer struct {
 	store *store
 	logf  func(string, ...any)
 
-	enrollLimit *ipLimiter
-	joinLimit   *ipLimiter
+	enrollLimit  *ipLimiter
+	joinLimit    *ipLimiter
+	requestLimit *ipLimiter
 }
 
 func newAPIServer(cfg Config, st *store, logf func(string, ...any)) *apiServer {
 	return &apiServer{
-		cfg:         cfg,
-		store:       st,
-		logf:        logf,
-		enrollLimit: newIPLimiter(10, 10*time.Minute),
-		joinLimit:   newIPLimiter(10, 10*time.Minute),
+		cfg:          cfg,
+		store:        st,
+		logf:         logf,
+		enrollLimit:  newIPLimiter(10, 10*time.Minute),
+		joinLimit:    newIPLimiter(10, 10*time.Minute),
+		requestLimit: newIPLimiter(10, time.Hour),
 	}
 }
 
@@ -50,6 +52,11 @@ func (a *apiServer) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agent/sync", a.agentOnly(a.handleSync))
 	mux.HandleFunc("GET /v1/agent/status", a.agentOnly(a.handleStatus))
 	mux.HandleFunc("DELETE /v1/agent", a.agentOnly(a.handleLeave))
+	mux.HandleFunc("POST /v1/request", a.handleRequestCreate)
+	mux.HandleFunc("GET /v1/request/{id}", a.handleRequestStatus)
+	mux.HandleFunc("POST /v1/request/{id}/reveal", a.handleRequestReveal)
+	mux.HandleFunc("POST /v1/agent/requests", a.agentOnly(a.handleRequestWindow))
+	mux.HandleFunc("POST /v1/agent/request", a.agentOnly(a.handleRequestAction))
 }
 
 // admitHandler answers derpserver's --verify-client-url style requests.
@@ -285,10 +292,12 @@ func (a *apiServer) handleEvents(w http.ResponseWriter, r *http.Request, agentID
 				}
 			}
 		}
+		s.reqGCLocked(time.Now())
+		reqs := s.requestEventsLocked(agentID)
 		changed := s.changed
 		s.mu.Unlock()
-		if len(out) > 0 {
-			writeJSON(w, http.StatusOK, api.EventsResponse{Submissions: out})
+		if len(out) > 0 || len(reqs) > 0 {
+			writeJSON(w, http.StatusOK, api.EventsResponse{Submissions: out, Requests: reqs})
 			return
 		}
 		select {

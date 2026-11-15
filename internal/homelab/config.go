@@ -72,6 +72,9 @@ type Invite struct {
 	// TelegramMessage is the invite bot's message showing the code, edited
 	// once the invite is used and deleted when it expires or is revoked.
 	TelegramMessage int64 `json:"telegram_message,omitempty"`
+	// Replace lets the invite re-enroll an existing device of the same name
+	// (`invite --replace`, `homelab move`): its old key and SSH key go.
+	Replace bool `json:"replace,omitempty"`
 }
 
 // UsedInvite remembers an approval until the relay has it.

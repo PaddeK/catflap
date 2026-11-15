@@ -31,11 +31,12 @@ through catflap (`from="127.0.0.1,::1"`), not over your LAN.
 | Who | Can | Can't |
 |---|---|---|
 | **The relay** (or someone who took it over) | see which devices connect when, from which IP; block the service; let unknown devices talk *to the relay* | read your traffic, read invites, learn your homelab's address, add a device to your homelab |
-| **Someone with an unused invite** | enroll one device under that name, until the invite expires or is used | anything after that; you see the device in `catflap list` (and get an alert, if set up) |
+| **Someone with an unused invite** | enroll one device under that name, until the invite expires or is used. A re-enroll invite (`--replace`, `homelab move`) replaces that device, its SSH key included | anything after that; you see the device in `catflap list` (and get an alert, if set up) |
 | **A stolen client device** | connect like you did, until you remove it (and log in only if its SSH key isn't protected by a passphrase or agent) | anything once removed |
 | **Telegram** (if you use the bot) | read the bot chat: invites, device names, status | use an invite after it was used or expired |
 | **Someone in your Telegram account** | create invites and remove devices through the bot | stay unnoticed if you have a second alert channel |
-| **Your ntfy/Pushover service** | read alert texts (device names, IP addresses) | change anything |
+| **Your ntfy/Pushover service** | read alert texts (device names, IP addresses, request codes) | change anything, approve a request |
+| **Anyone who knows `homelab`** | ask to join while your request window is open (a few times per hour) | get in without your approval in Telegram or on the homelab |
 | **Someone on your network or the internet** | see encrypted traffic to the relay | read it, or reach the homelab |
 
 ## Good habits
@@ -46,6 +47,8 @@ through catflap (`from="127.0.0.1,::1"`), not over your LAN.
   Telegram are reported on the other channel, so you'd notice someone else in your account.
 - **Protect your Telegram account** with Two-Step Verification (Settings → Privacy and
   Security). Whoever controls it controls the bot.
+- **Compare the code before you approve a request**, and open the request window only when you
+  need it (it closes by itself after an hour).
 - **Keep invites short-lived.** Use long ones (`--ttl 30d`, "break-glass") only stored in a
   password manager.
 - **Protect your SSH key with a passphrase** (and use an SSH agent so you don't type it all the

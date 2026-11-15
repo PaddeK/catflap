@@ -108,6 +108,9 @@ Invite for "laptop" (one use, valid until 2026-11-15 14:32):
 
 The invite is valid for 15 minutes and works once. Treat it like a password until it's used.
 
+(No access to the homelab right now? With the Telegram bot set up, a new device can also ask to
+join and you approve it with a tap: see [Using catflap](using-catflap.md#approve-a-new-device-from-your-phone-no-invite).)
+
 On the laptop, install catflap and run the `enroll` line:
 
 ```sh
@@ -147,6 +150,8 @@ On the homelab, for `catflap invite`:
 
 - `--ttl 2h`: keep the invite valid longer than 15 minutes (up to 90 days), e.g. for a device
   you set up later today. Long-lived invites belong in a password manager.
+- `--replace`: enroll an existing device again (e.g. after reinstalling it); its old entry and
+  SSH key are replaced.
 </details>
 
 ## 5. Connect

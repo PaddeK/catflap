@@ -45,6 +45,9 @@ type agent struct {
 	NodeKey   key.NodePublic    `json:"nodekey"` // the homelab's own tailcat key
 	Created   time.Time         `json:"created"`
 	Clients   map[string]string `json:"clients"` // nodekey -> device name
+	// RequestsUntil is the end of the homelab's request window (tap to
+	// approve); enrollment requests are refused outside it.
+	RequestsUntil time.Time `json:"requests_until,omitzero"`
 }
 
 type invite struct {
@@ -74,11 +77,12 @@ type store struct {
 	allowed  map[key.NodePublic]bool // derived: everything admitted at gate 1
 	byToken  map[string]string       // derived: token hash -> agent id
 	changed  chan struct{}           // closed and replaced when submissions arrive
+	reqs     map[string]*request     // enrollment requests (memory only)
 	lastSave error
 }
 
 func openStore(path string) (*store, error) {
-	s := &store{path: path, changed: make(chan struct{})}
+	s := &store{path: path, changed: make(chan struct{}), reqs: map[string]*request{}}
 	err := fsutil.ReadJSON(path, &s.st)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

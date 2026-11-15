@@ -90,7 +90,76 @@ type Submission struct {
 
 // EventsResponse is the answer to the agent's long poll.
 type EventsResponse struct {
-	Submissions []Submission `json:"submissions"`
+	Submissions []Submission   `json:"submissions"`
+	Requests    []RequestEvent `json:"requests,omitempty"`
+}
+
+// ---- enrollment requests (tap to approve, no invite) ----
+
+// RequestCreate is POSTed by a new device to /v1/request. The relay only
+// takes it while the homelab has its request window open.
+type RequestCreate struct {
+	Homelab  string `json:"homelab"`  // homelab name
+	Name     string `json:"name"`     // wanted device name
+	NodeKey  string `json:"nodekey"`  // tailcat client node key
+	BoxKey   string `json:"boxkey"`   // X25519 key the reply is sealed to (base64url)
+	SSHKey   string `json:"ssh_key"`  // may be empty
+	Hostname string `json:"hostname"` // informational
+	Commit   string `json:"commit"`   // codes.RequestCommit(reveal): binds the device's secret
+}
+
+// RequestCreated identifies the request for polling. HomelabKey is the
+// homelab's tailcat key as the relay knows it; it goes into the pairing
+// code, so a relay lying about it is caught by the code comparison.
+type RequestCreated struct {
+	ID         string `json:"id"`
+	HomelabKey string `json:"homelab_key"`
+}
+
+// Request statuses (besides StatusPending/Approved/Rejected).
+const (
+	StatusWaiting = "waiting" // the homelab hasn't answered yet
+	StatusReveal  = "reveal"  // Nonce is there: reveal the secret
+)
+
+// RequestStatus is returned by GET /v1/request/{id}.
+type RequestStatus struct {
+	Status string `json:"status"`
+	Nonce  string `json:"nonce,omitempty"`  // the homelab's random value
+	Sealed string `json:"sealed,omitempty"` // approved: SealedReply sealed to BoxKey
+	Reason string `json:"reason,omitempty"`
+}
+
+// RequestReveal is POSTed to /v1/request/{id}/reveal.
+type RequestReveal struct {
+	Reveal string `json:"reveal"`
+}
+
+// RequestEvent asks the homelab to act on a request: Stage "new" (send a
+// nonce) or "revealed" (check the commit, show the code to the user).
+type RequestEvent struct {
+	ID       string        `json:"id"`
+	Stage    string        `json:"stage"`
+	Request  RequestCreate `json:"request"`
+	Reveal   string        `json:"reveal,omitempty"`
+	Source   string        `json:"source"`
+	Received time.Time     `json:"received"`
+}
+
+// RequestAction is the homelab's step on a request: "nonce", "shown"
+// (code shown to the user, waiting), "approve" or "deny".
+type RequestAction struct {
+	ID     string `json:"id"`
+	Action string `json:"action"`
+	Nonce  string `json:"nonce,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Sealed string `json:"sealed,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// RequestWindow opens (Until in the future) or closes the request window.
+type RequestWindow struct {
+	Until time.Time `json:"until"`
 }
 
 // ResultRequest answers one submission. Approving admits NodeKey at the

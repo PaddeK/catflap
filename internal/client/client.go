@@ -108,11 +108,18 @@ type EnrollOptions struct {
 	SSHKeyFile  string // public key to authorize; default: id_ed25519.pub or a new key
 	NoSSHKey    bool   // don't send an SSH key at all
 	NoSSHConfig bool   // don't touch ~/.ssh/config
-	Out         io.Writer
+	// Request (HOMELAB) asks for approval instead of using an invite;
+	// Name is the wanted device name (default: from the hostname).
+	Request string
+	Name    string
+	Out     io.Writer
 }
 
 // Enroll redeems an invite.
 func Enroll(ctx context.Context, o EnrollOptions) error {
+	if o.Request != "" {
+		return enrollByRequest(ctx, o)
+	}
 	out := o.Out
 	code, err := codes.Parse(o.Invite, codes.KindInvite)
 	if err != nil {
@@ -180,55 +187,7 @@ func Enroll(ctx context.Context, o EnrollOptions) error {
 	if err := json.Unmarshal(pt, &reply); err != nil {
 		return fmt.Errorf("bad reply from homelab: %w", err)
 	}
-	if _, err := tailcat.ParseAddr(tailcat.Addr(reply.Addr)); err != nil {
-		return fmt.Errorf("homelab sent an invalid address: %w", err)
-	}
-	alias := o.Alias
-	if alias == "" {
-		alias = reply.Homelab
-	}
-	if alias == "" || reservedAlias(alias) {
-		alias = "homelab"
-	}
-	if _, exists := st.Servers[alias]; exists {
-		fmt.Fprintf(out, "Note: replacing the existing entry %q.\n", alias)
-	}
-	st.Servers[alias] = &Server{
-		Addr: reply.Addr, Key: devKey, Relay: code.Relay, Homelab: reply.Homelab, DeviceName: reply.Name,
-		SSHUser: reply.SSHUser, IdentityFile: identity, Enrolled: time.Now(),
-	}
-	if err := fsutil.WriteJSON(path, st, 0o600); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "Approved: this device is %q on homelab %q.\n", reply.Name, reply.Homelab)
-
-	if !o.NoSSHConfig {
-		cfgPath, warn, err := WriteSSHConfig(alias, st.Servers[alias])
-		if err != nil {
-			fmt.Fprintf(out, "Could not update the ssh config: %v\n", err)
-		} else {
-			fmt.Fprintf(out, "Added Host %q to %s\n", alias, cfgPath)
-			if warn != "" {
-				fmt.Fprintln(out, "Warning:", warn)
-			}
-		}
-	}
-
-	fmt.Fprint(out, "Checking the tunnel... ")
-	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
-	banner, err := Probe(cctx, alias, 22)
-	if err != nil {
-		fmt.Fprintf(out, "not reachable yet (%v)\n", err)
-	} else {
-		fmt.Fprintf(out, "ok (%s)\n", banner)
-	}
-	if !o.NoSSHConfig {
-		fmt.Fprintf(out, "\nConnect with:  ssh %s\n", alias)
-	} else {
-		fmt.Fprintf(out, "\nConnect with:  ssh -o ProxyCommand='catflap proxy %s' %s@%s\n", alias, reply.SSHUser, alias)
-	}
-	return nil
+	return finishEnroll(ctx, o, st, path, devKey, code.Relay, identity, reply)
 }
 
 // pickSSHKey returns the public key line to authorize and the identity file
@@ -344,6 +303,61 @@ func Proxy(ctx context.Context, alias string, port uint16) error {
 	select {
 	case <-done:
 	case <-ctx.Done():
+	}
+	return nil
+}
+
+// finishEnroll stores an approved enrollment (invite or request), writes
+// the ssh config and checks the tunnel.
+func finishEnroll(ctx context.Context, o EnrollOptions, st *State, path string, devKey key.NodePrivate, relay, identity string, reply api.SealedReply) error {
+	out := o.Out
+	if _, err := tailcat.ParseAddr(tailcat.Addr(reply.Addr)); err != nil {
+		return fmt.Errorf("homelab sent an invalid address: %w", err)
+	}
+	alias := o.Alias
+	if alias == "" {
+		alias = reply.Homelab
+	}
+	if alias == "" || reservedAlias(alias) {
+		alias = "homelab"
+	}
+	if _, exists := st.Servers[alias]; exists {
+		fmt.Fprintf(out, "Note: replacing the existing entry %q.\n", alias)
+	}
+	st.Servers[alias] = &Server{
+		Addr: reply.Addr, Key: devKey, Relay: relay, Homelab: reply.Homelab, DeviceName: reply.Name,
+		SSHUser: reply.SSHUser, IdentityFile: identity, Enrolled: time.Now(),
+	}
+	if err := fsutil.WriteJSON(path, st, 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Approved: this device is %q on homelab %q.\n", reply.Name, reply.Homelab)
+
+	if !o.NoSSHConfig {
+		cfgPath, warn, err := WriteSSHConfig(alias, st.Servers[alias])
+		if err != nil {
+			fmt.Fprintf(out, "Could not update the ssh config: %v\n", err)
+		} else {
+			fmt.Fprintf(out, "Added Host %q to %s\n", alias, cfgPath)
+			if warn != "" {
+				fmt.Fprintln(out, "Warning:", warn)
+			}
+		}
+	}
+
+	fmt.Fprint(out, "Checking the tunnel... ")
+	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	banner, err := Probe(cctx, alias, 22)
+	if err != nil {
+		fmt.Fprintf(out, "not reachable yet (%v)\n", err)
+	} else {
+		fmt.Fprintf(out, "ok (%s)\n", banner)
+	}
+	if !o.NoSSHConfig {
+		fmt.Fprintf(out, "\nConnect with:  ssh %s\n", alias)
+	} else {
+		fmt.Fprintf(out, "\nConnect with:  ssh -o ProxyCommand='catflap proxy %s' %s@%s\n", alias, reply.SSHUser, alias)
 	}
 	return nil
 }

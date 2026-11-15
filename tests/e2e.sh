@@ -272,6 +272,56 @@ check "bot edits the question into the result" fake has tg "Removed <b>tgdev</b>
 check "device removed from the phone" bash -c "! $H '$CF' list | grep -q '^tgdev'"
 check "alert: device removed via the bot" fake has ntfy "tgdev was removed via the Telegram bot"
 check "notify test reaches every channel" $H "$CF" notify test
+
+echo "== enrollment requests (tap to approve)"
+RQ="testlab@127.0.0.1:18443"
+waitcode() { for _ in $(seq 150); do c=$(grep -o 'Code:  [0-9]\{3\} [0-9]\{3\}' "$1" 2>/dev/null | tr -dc 0-9 || true); [ -n "$c" ] && { echo "$c"; return; }; sleep 0.1; done; }
+mkdir -p "$T/c8" "$T/c9" "$T/c10" "$T/c11"
+check "requests are refused while the window is closed" bash -c "env CATFLAP_DIR='$T/c8' CATFLAP_SSH_CONFIG='$T/c8/ssh_config' '$CF' enroll --request $RQ --no-ssh-key 2>&1 | grep -q 'accepts enrollment requests right now'"
+$H "$CF" requests on --for 10m > "$T/rqon.log" 2>&1
+check "requests on: open, with the command for the new device" bash -c "grep -q 'open until' '$T/rqon.log' && grep -q 'catflap enroll --request testlab@' '$T/rqon.log'"
+check "alert: the window was opened" fake has ntfy "enrollment requests open"
+
+# Approve on the homelab with the code.
+env CATFLAP_DIR="$T/c8" CATFLAP_SSH_CONFIG="$T/c8/ssh_config" "$CF" enroll --request "$RQ" --name req1 --no-ssh-key > "$T/c8.log" 2>&1 &
+C8=$!
+CODE=$(waitcode "$T/c8.log")
+check "the new device shows a 6-digit code" test -n "$CODE"
+check "catflap requests lists it with the same code" bash -c "$H '$CF' requests | grep '^req1' | tr -d ' ' | grep -q '$CODE'"
+check "Telegram asks with the same code and buttons" bash -c "python3 -I tests/fakeservices.py '$FAKE' has tg 'Approve req1' && python3 -I tests/fakeservices.py '$FAKE' has tg '${CODE:0:3} ${CODE:3:3}'"
+check "the other channels get it with the code" fake has ntfy "catflap approve $CODE"
+check "a wrong code approves nothing" bash -c "$H '$CF' approve 000000 2>&1 | grep -q 'no pending request'"
+$H "$CF" approve "$CODE" > "$T/approve.log" 2>&1
+wait $C8 || true
+check "catflap approve: the device is enrolled" bash -c "grep -q 'approved \"req1\"' '$T/approve.log' && grep -q 'Approved: this device is \"req1\"' '$T/c8.log'"
+OUT=$(printf 'tap\n' | timeout 30 env CATFLAP_DIR="$T/c8" "$CF" proxy testlab 22 2>>"$T/proxy.err" | head -2 | tr -d '\r' | tr '\n' '|')
+check "the approved device has a working tunnel ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake|tap|"
+check "the Telegram message turns into the result" fake has tg "Approved: <b>req1</b> is enrolled"
+check "alert: new device approved on the homelab" fake has ntfy "req1 (hostname"
+
+# Deny and approve with the Telegram buttons.
+env CATFLAP_DIR="$T/c9" CATFLAP_SSH_CONFIG="$T/c9/ssh_config" "$CF" enroll --request "$RQ" --name req2 --no-ssh-key > "$T/c9.log" 2>&1 &
+C9=$!
+waitcode "$T/c9.log" > /dev/null
+for _ in $(seq 50); do python3 -I tests/fakeservices.py "$FAKE" has tg 'Approve req2' --now && break; sleep 0.1; done
+fake button 4242 "$(fake callback rd:)"
+wait $C9 || true
+check "Deny in Telegram: the device is told" grep -q 'request denied' "$T/c9.log"
+env CATFLAP_DIR="$T/c10" CATFLAP_SSH_CONFIG="$T/c10/ssh_config" "$CF" enroll --request "$RQ" --name req3 --no-ssh-key > "$T/c10.log" 2>&1 &
+C10=$!
+waitcode "$T/c10.log" > /dev/null
+for _ in $(seq 50); do python3 -I tests/fakeservices.py "$FAKE" has tg 'Approve req3' --now && break; sleep 0.1; done
+fake button 4242 "$(fake callback ra:)"
+wait $C10 || true
+check "Approve in Telegram: the device is enrolled" grep -q 'Approved: this device is "req3"' "$T/c10.log"
+check "a taken name is refused" bash -c "env CATFLAP_DIR='$T/c11' CATFLAP_SSH_CONFIG='$T/c11/ssh_config' timeout 60 '$CF' enroll --request $RQ --name req1 --no-ssh-key 2>&1 | grep -q 'is taken'"
+
+fake update 4242 "/requests off"
+check "/requests off in Telegram closes the window" fake has tg "Enrollment requests are closed"
+check "requests are refused again" bash -c "env CATFLAP_DIR='$T/c11' CATFLAP_SSH_CONFIG='$T/c11/ssh_config' '$CF' enroll --request $RQ --name late --no-ssh-key 2>&1 | grep -q 'accepts enrollment requests right now'"
+fake update 4242 "/requests on 5m"
+check "/requests on 5m in Telegram opens it" fake has tg "Enrollment requests are open until"
+$H "$CF" requests off > /dev/null
 $H "$CF" notify remove telegram > /dev/null
 check "notify remove" bash -c "! $H '$CF' notify list | grep -q telegram"
 
@@ -304,7 +354,50 @@ json.dump(legacy, open(sys.argv[2], "w"))
 PY
 OUT=$(printf 'old\n' | timeout 30 env CATFLAP_DIR="$T/c7" "$CF" proxy testlab 22 2>/dev/null | head -2 | tr -d '\r' | tr '\n' '|')
 check "a client from before v0.3 (one shared key) still works" test "$OUT" = "SSH-2.0-catflap-e2e-fake|old|"
+
+echo "== move a homelab to another relay (new address)"
+mkdir -p "$T/relay2"
+cat > "$T/relay2/relay.json" <<EOF
+{"hostname":"127.0.0.1","listen":"127.0.0.1:18444","http_port":0,"stun_port":13479,
+ "cert_mode":"manual","cert_file":"$T/cert.pem","key_file":"$T/key.pem",
+ "state_dir":"$T/relay2/state","admin_socket":"$T/relay2/admin.sock"}
+EOF
+"$CF" relay run --config "$T/relay2/relay.json" > "$T/relay2.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 50); do [ -S "$T/relay2/admin.sock" ] && break; sleep 0.1; done
+R2="--config $T/relay2/relay.json"
+JM=$("$CF" relay join-code $R2 | grep -o 'cfj1-[^ ]*')
+check "move refuses while the homelab runs" bash -c "$H3 '$CF' homelab move --join '$JM' --yes 2>&1 | grep -q 'homelab is running'"
 kill "$H3PID" 2>/dev/null || true; wait "$H3PID" 2>/dev/null || true
+$H3 "$CF" homelab move --join "$JM" --yes > "$T/move.log" 2>&1 || true
+check "move: the homelab uses the new relay" grep -q 'now uses relay 127.0.0.1:18444' "$T/move.log"
+check "move: gone from the old relay, registered with the new one" bash -c "! '$CF' relay status --config '$T/relay/relay.json' | grep -q 'homelab \"lab3\"' && '$CF' relay status $R2 | grep -q 'homelab \"lab3\"'"
+RINV=$(grep -A1 '^  multi:' "$T/move.log" | grep -o 'cfi1-[^ ]*' || true)
+check "move: prints a re-enroll invite per device" test -n "$RINV"
+$H3 "$CF" homelab run >> "$T/homelab3.log" 2>&1 &
+H3PID=$!
+PIDS+=("$H3PID")
+for _ in $(seq 100); do [ -S "$T/homelab3/control.sock" ] && break; sleep 0.1; done
+client c6 enroll "$RINV" --no-ssh-key > "$T/c6m.log" 2>&1 || true
+check "the device re-enrolls with it" grep -q 'Approved: this device is "multi"' "$T/c6m.log"
+check "the device is replaced, not added twice" bash -c "[ \$($H3 '$CF' list | grep -c '^multi ') = 1 ]"
+check "the client's entry points to the new relay, the other homelab is untouched" python3 -I -c 'import json, sys
+s = json.load(open(sys.argv[1]))["servers"]
+sys.exit(0 if s["lab3"]["relay"].endswith(":18444") and s["testlab"]["relay"].endswith(":18443") else 1)' "$T/c6/client.json"
+OUT=$(printf 'moved\n' | timeout 30 env CATFLAP_DIR="$T/c6" "$CF" proxy lab3 22 2>>"$T/proxy.err" | head -2 | tr -d '\r' | tr '\n' '|')
+check "the tunnel works through the new relay ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake|moved|"
+JM2=$("$CF" relay join-code $R2 | grep -o 'cfj1-[^ ]*')
+check "move refuses the relay it uses already" bash -c "$H3 '$CF' homelab move --join '$JM2' --yes 2>&1 | grep -q 'uses relay 127.0.0.1:18444 already'"
+kill "$H3PID" 2>/dev/null || true; wait "$H3PID" 2>/dev/null || true
+
+echo "== invite --replace"
+check "a plain invite for an existing name is refused" bash -c "$H '$CF' invite multi 2>&1 | grep -q 'exists already'"
+check "--replace for an unknown name is refused" bash -c "$H '$CF' invite nosuch --replace 2>&1 | grep -q 'no device named'"
+RI=$($H "$CF" invite multi --replace | grep -o 'cfi1-[^ ]*')
+client c6 enroll "$RI" --no-ssh-key > "$T/c6r.log" 2>&1 || true
+check "invite --replace re-enrolls an existing device" bash -c "grep -q Approved '$T/c6r.log' && [ \$($H '$CF' list | grep -c '^multi ') = 1 ]"
+OUT=$(printf 'again\n' | timeout 30 env CATFLAP_DIR="$T/c6" "$CF" proxy testlab 22 2>>"$T/proxy.err" | head -2 | tr -d '\r' | tr '\n' '|')
+check "the re-enrolled device works ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake|again|"
 
 echo "== relay remove, setup --force, uninstall"
 RC="--config $T/relay/relay.json"
