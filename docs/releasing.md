@@ -23,17 +23,28 @@ Every file in `checksums.txt` also gets a signed **build provenance attestation*
 (Sigstore, keyless, via `actions/attest-build-provenance`). It proves the file was built
 by this repository's release workflow from a specific commit.
 
-## Before the first release (one-time)
+## Repository settings
 
-- Make the repository public. GitHub build attestations need a public repository
-  (private ones need GitHub Enterprise Cloud), so the release workflow would fail before.
-- Repository settings:
-  - **Rules → Rulesets:** protect tags `v*` (only maintainers may create them, nobody may
-    move or delete them), and require the `ci` checks on `main`.
-  - **Releases:** turn on immutable releases, so published files can't be swapped later.
-  - **Actions → General:** workflow permissions "Read repository contents". The workflows
-    ask for what they need themselves (`release.yml`: `contents`, `id-token`, `attestations`).
-- Once tailcat v0.8 is out, switch `go.mod` from the pinned main commit to the tag.
+The release process relies on these settings (set since 2026-11-15; check them on a fork):
+
+- **Public repository.** GitHub build attestations need one (private repositories need
+  GitHub Enterprise Cloud).
+- **Rulesets:**
+  - *release tags are permanent*: tags `v*` can't be moved or deleted, by anyone.
+  - *main: no force push or deletion*: no bypass.
+  - *main: CI must pass*: all five `ci` jobs must be green before a pull request can be
+    merged. Repository admins may push directly.
+- **Immutable releases:** once published, a release's files can't be replaced or deleted.
+  goreleaser creates the release as a draft, uploads everything, then publishes it.
+- **Actions:** the default workflow token is read-only and can't approve pull requests.
+  The workflows ask for what they need themselves (`release.yml`: `contents`, `id-token`,
+  `attestations`).
+- **Security:** Dependabot alerts and security updates, secret scanning with push
+  protection, private vulnerability reporting (see [SECURITY.md](../SECURITY.md)).
+  `.github/dependabot.yml` proposes updates for the pinned Actions weekly. Go
+  dependencies are bumped by hand: tailcat and `tailscale.com` must move together.
+
+Once tailcat v0.8 is out, switch `go.mod` from the pinned main commit to the tag.
 
 ## Cut a release
 

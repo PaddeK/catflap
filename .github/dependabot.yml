@@ -1,0 +1,12 @@
+# Weekly update proposals for the GitHub Actions pinned (by commit SHA) in the workflows.
+# Go modules are left out on purpose: tailcat and tailscale.com must be bumped together,
+# by hand, and checked with tests/e2e.sh.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
