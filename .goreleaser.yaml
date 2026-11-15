@@ -43,6 +43,25 @@ checksum:
     - glob: install.ps1
 
 release:
+  header: |
+    ## Install or upgrade
+
+    Linux and macOS:
+
+    ```sh
+    curl -fsSL https://github.com/PaddeK/catflap/releases/download/{{ .Tag }}/install.sh | CATFLAP_VERSION={{ .Tag }} sh
+    ```
+
+    Windows (PowerShell):
+
+    ```powershell
+    $env:CATFLAP_VERSION = '{{ .Tag }}'; irm https://github.com/PaddeK/catflap/releases/download/{{ .Tag }}/install.ps1 | iex
+    ```
+
+    The scripts check the download against `checksums.txt`. Every file also has a signed build
+    attestation: `gh attestation verify <file> --repo PaddeK/catflap`.
+    Running services keep the old version until restarted; see
+    [upgrading](https://github.com/PaddeK/catflap/blob/main/docs/releasing.md#upgrade-a-running-setup).
   extra_files:
     - glob: install.sh
     - glob: install.ps1
