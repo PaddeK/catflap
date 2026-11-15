@@ -14,8 +14,14 @@ Set-Location $root
 $script:pass = 0; $script:fail = 0
 function Check([string]$name, [scriptblock]$test) {
     $r = $false
-    try { $r = [bool](& $test) } catch { $r = $false }
-    if ($r) { Write-Host "  PASS  $name"; $script:pass++ } else { Write-Host "  FAIL  $name"; $script:fail++ }
+    $script:out = ''
+    $err = $null
+    try { $r = [bool](& $test) } catch { $r = $false; $err = $_ }
+    if ($r) { Write-Host "  PASS  $name"; $script:pass++; return }
+    Write-Host "  FAIL  $name"; $script:fail++
+    # Show what happened: the installer's output and the error, if any.
+    if ($script:out) { ($script:out.TrimEnd() -split "`n") | ForEach-Object { Write-Host "        $_" } }
+    if ($err) { Write-Host "        error: $($err.Exception.Message)" }
 }
 
 $arch = if ([string][Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'amd64' }
@@ -75,7 +81,9 @@ try {
     Remove-Item Env:CATFLAP_REPO, Env:CATFLAP_VERSION -ErrorAction SilentlyContinue
     function Inst([string]$name) {
         $env:CATFLAP_BASE_URL = "http://localhost:$port/$name"
-        Invoke-Expression $installer *>&1 | Out-String
+        $script:out = ''
+        $script:out = Invoke-Expression $installer *>&1 | Out-String
+        $script:out
     }
 
     Write-Host '== install.ps1'
@@ -92,8 +100,15 @@ try {
     $env:CATFLAP_DIR = "$T\cfg"
     $agent = Start-Process -FilePath $dst -ArgumentList 'agent' -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 800
-    Check 'upgrade while catflap.exe runs' { -not $agent.HasExited -and (Inst good) -match 'installed' }
-    Check 'running exe moved aside' { @(Get-ChildItem $dir -Filter 'catflap.exe.old-*').Count -eq 1 }
+    Check 'upgrade while catflap.exe runs' {
+        if ($agent.HasExited) { throw "the test agent exited early (code $($agent.ExitCode))" }
+        (Inst good) -match 'installed'
+    }
+    Check 'running exe moved aside' {
+        $l = @(Get-ChildItem $dir -Name)
+        if (@($l | Where-Object { $_ -like 'catflap.exe.old-*' }).Count -ne 1) { throw "install dir has: $($l -join ', ')" }
+        $true
+    }
     Stop-Process -Id $agent.Id -Force; $agent.WaitForExit(); $agent = $null
     Check 'next upgrade removes the old file' { Inst good | Out-Null; @(Get-ChildItem $dir -Name).Count -eq 1 }
 
