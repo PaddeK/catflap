@@ -3,6 +3,7 @@ package relay
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	if _, err := WriteBackup(cfg, path); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 { // no Unix modes on Windows
 		t.Fatalf("backup mode %v, want 600 (it holds the DERP key)", fi.Mode().Perm())
 	}
 	if _, err := WriteBackup(cfg, path); err == nil {

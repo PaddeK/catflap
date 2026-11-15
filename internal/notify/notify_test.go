@@ -222,7 +222,7 @@ func TestLoadSave(t *testing.T) {
 	if err := Save(p, c); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(p); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 { // no Unix modes on Windows
 		t.Fatalf("mode %v, want 600", fi.Mode().Perm())
 	}
 	if c2, err := Load(p); err != nil || c2.Channels[0].Token != "secret" {
