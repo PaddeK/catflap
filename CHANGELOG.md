@@ -6,6 +6,8 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
+## v0.5.1 (2026-11-16)
+
 - `catflap <command> -h` shows the command's options (or the overview, for commands without
   options) and exits cleanly; `catflap help` says so.
 - Durations take days: `catflap invite NAME --ttl 7d`, `homelab move --ttl 3d`,
