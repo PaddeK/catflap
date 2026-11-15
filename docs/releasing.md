@@ -93,9 +93,10 @@ keep the old file until they restart:
 
 - **Clients:** nothing to do. The client agent notices the new build on the next
   connection, lets open sessions finish and hands over to a fresh agent.
-- **Homelab:** `systemctl --user restart catflap`. This cuts open sessions through catflap,
-  including the one you may be typing in; reconnect after a few seconds.
-- **Relay:** `curl -fsSL …/install.sh | sudo sh`, then `sudo systemctl restart catflap-relay`.
+- **Homelab:** `catflap restart`. This cuts open sessions through catflap, including the one
+  you may be typing in (catflap warns you then); reconnect after a few seconds.
+  `catflap status` shows the running version.
+- **Relay:** `curl -fsSL …/install.sh | sudo sh`, then `sudo catflap restart`.
   Connected devices reconnect on their own.
 
 `catflap version` shows the version, the commit and the embedded tailcat and Tailscale versions.

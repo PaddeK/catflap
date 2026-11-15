@@ -127,10 +127,10 @@ main() {
 	# Upgrades: running services keep the old binary until they restart.
 	if command -v systemctl >/dev/null 2>&1; then
 		if [ "$(id -u)" = 0 ] && systemctl is-active --quiet catflap-relay 2>/dev/null; then
-			echo "the relay still runs the old version: systemctl restart catflap-relay"
+			echo "the relay still runs the old version; restart it with: catflap restart"
 		fi
 		if [ "$(id -u)" != 0 ] && systemctl --user is-active --quiet catflap 2>/dev/null; then
-			echo "the homelab still runs the old version: systemctl --user restart catflap"
+			echo "the homelab still runs the old version; restart it with: catflap restart"
 			echo "(this cuts open sessions through catflap, including the one you may be using now)"
 		fi
 	fi

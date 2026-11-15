@@ -19,6 +19,7 @@ import (
 
 	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/client"
+	"github.com/PaddeK/catflap/internal/fsutil"
 	"github.com/PaddeK/catflap/internal/homelab"
 	"github.com/PaddeK/catflap/internal/relay"
 	"github.com/PaddeK/catflap/internal/setup"
@@ -58,6 +59,7 @@ Relay administration (as root):
 
 Other:
   catflap status                       show what is set up on this machine
+  catflap restart [relay|homelab]      restart the service, e.g. after an upgrade
   catflap version
 
 Daemons (started by systemd):
@@ -136,6 +138,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdForget(args)
 	case "status":
 		return cmdStatus(ctx)
+	case "restart":
+		return cmdRestart(ctx, args)
 	}
 	return fmt.Errorf("unknown command %q (see `catflap help`)", cmd)
 }
@@ -622,11 +626,15 @@ func cmdStatus(ctx context.Context) error {
 			if err := homelab.Control(p).Do(ctx, "GET", "/status", nil, &s); err != nil {
 				fmt.Printf("homelab: %q via %s - NOT RUNNING (%v)\n", cfg.Name, cfg.Relay, ctlErr(err))
 			} else {
+				ver := s.Version
+				if ver == "" {
+					ver = "(an older version)"
+				}
 				sync := ""
 				if s.NeedsSync {
 					sync = ", relay sync pending"
 				}
-				fmt.Printf("homelab: %q via %s - running, %d device(s), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, s.Devices, s.Invites, strings.Join(s.Forwards, ", "), sync)
+				fmt.Printf("homelab: %q via %s - running catflap %s, %d device(s), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, ver, s.Devices, s.Invites, strings.Join(s.Forwards, ", "), sync)
 			}
 		}
 	}
@@ -641,6 +649,42 @@ func cmdStatus(ctx context.Context) error {
 		fmt.Println("nothing set up on this machine yet (see `catflap help`)")
 	}
 	return nil
+}
+
+// cmdRestart restarts the relay or homelab service (whichever is set up here).
+func cmdRestart(ctx context.Context, args []string) error {
+	role := ""
+	switch len(args) {
+	case 0:
+	case 1:
+		role = args[0]
+	default:
+		return errors.New("usage: catflap restart [relay|homelab]")
+	}
+	if role == "" {
+		hasRelay := fsutil.Exists(relay.DefaultConfigPath)
+		hasHomelab := false
+		if p, err := homelab.DefaultPaths(); err == nil {
+			hasHomelab = fsutil.Exists(p.Config)
+		}
+		switch {
+		case hasRelay && hasHomelab:
+			return errors.New("both a relay and a homelab are set up here: catflap restart relay|homelab")
+		case hasRelay:
+			role = "relay"
+		case hasHomelab:
+			role = "homelab"
+		default:
+			return errors.New("nothing to restart here: no relay or homelab is set up.\n(On a client there is no service: its agent switches to a new version by itself.)")
+		}
+	}
+	switch role {
+	case "relay":
+		return setup.RestartRelay(ctx, os.Stdout)
+	case "homelab":
+		return setup.RestartHomelab(ctx, os.Stdout)
+	}
+	return fmt.Errorf("unknown role %q (want relay or homelab)", role)
 }
 
 func cmdVersion() error {

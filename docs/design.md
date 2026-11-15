@@ -158,6 +158,7 @@ catflap forward remove PORT...          # also cuts open connections on that por
 catflap forward list
 catflap notify add telegram|ntfy|pushover|command [--name N]   # prompts for tokens
 catflap notify list | remove NAME | test [NAME]
+catflap restart [relay|homelab]         # restarts the service of whatever is set up here (systemd)
 
 catflap enroll INVITE [--alias homelab] [--ssh-key FILE.pub] [--no-ssh-config]
 catflap proxy ALIAS [PORT]              # ssh ProxyCommand: stdio <-> homelab port (default 22)

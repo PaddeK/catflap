@@ -112,6 +112,11 @@ func Run(ctx context.Context, p Paths) error {
 		d.logf("notify: %v; NOTIFICATIONS ARE OFF until this is fixed", err)
 	}
 	d.agentLoop(ctx)
+
+	// Shutting down (e.g. `catflap restart`): close open connections first and
+	// give the closing packets a moment to reach the clients.
+	d.closeForwards()
+	time.Sleep(500 * time.Millisecond)
 	return nil
 }
 
@@ -470,6 +475,7 @@ type InviteInfo struct {
 // StatusInfo is returned by the status command.
 type StatusInfo struct {
 	Name      string   `json:"name"`
+	Version   string   `json:"version"` // of the running daemon
 	Relay     string   `json:"relay"`
 	Addr      string   `json:"addr"`
 	Devices   int      `json:"devices"`
@@ -543,7 +549,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
-		s := StatusInfo{Name: d.cfg.Name, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), NeedsSync: d.st.NeedsSync}
+		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), NeedsSync: d.st.NeedsSync}
 		for _, inv := range d.st.Invites {
 			if inv.Used == nil {
 				s.Invites++

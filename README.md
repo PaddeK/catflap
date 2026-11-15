@@ -25,7 +25,7 @@ irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex
 ```
 
 Both scripts verify the download against the release's `checksums.txt` and install
-nothing on a mismatch. Run them again to upgrade. You can also download a binary from the
+nothing on a mismatch. Run them again to upgrade, then `catflap restart` on a homelab or relay. You can also download a binary from the
 [releases page](https://github.com/PaddeK/catflap/releases) and check its signed build
 attestation: `gh attestation verify catflap_linux_amd64 --repo PaddeK/catflap`.
 See [docs/releasing.md](docs/releasing.md) for details.

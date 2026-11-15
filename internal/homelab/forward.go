@@ -243,3 +243,15 @@ func (d *Daemon) saveForwardsLocked() error {
 	d.cfg.Forwards = m
 	return nil
 }
+
+// closeForwards ends every listener and open connection, so clients see
+// their sessions close at once (ssh exits) when the homelab shuts down,
+// instead of hanging until a keepalive timeout.
+func (d *Daemon) closeForwards() {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	for port, f := range d.fwds {
+		f.close()
+		delete(d.fwds, port)
+	}
+}
