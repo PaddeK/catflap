@@ -115,6 +115,13 @@
             $key.Close()
         }
         if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$env:Path;$dir" }
+
+        # Upgrades: a running homelab keeps the old version until it restarts. (cmd /c keeps
+        # schtasks' error output away from PowerShell, which would stop on it.)
+        cmd.exe /c 'schtasks /Query /TN catflap-homelab >nul 2>&1'
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host 'this machine is a homelab: restart it with "catflap restart" to run the new version'
+        }
     } finally {
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }

@@ -1,7 +1,8 @@
 # Using catflap
 
 Day-to-day tasks after the [setup](getting-started.md). Commands marked *homelab* run on the
-homelab as your normal user; *client* commands run on the device you connect from.
+homelab as your normal user; *client* commands run on the device you connect from. Unfamiliar
+words are explained [at the end of Getting started](getting-started.md#words-used-in-these-guides).
 
 - [Devices](#devices)
 - [More ports (forwards)](#more-ports-forwards)
@@ -17,14 +18,14 @@ homelab as your normal user; *client* commands run on the device you connect fro
 
 | Task | Command |
 |---|---|
-| invite a device (*homelab*) | `catflap invite NAME` (valid 15 min, one use; `--ttl 2h` for longer) |
-| re-enroll an existing device (*homelab*) | `catflap invite NAME --replace` |
+| invite a device (*homelab*) | `catflap invite NAME` (valid 15 min, one use; `--ttl 2h` for longer, up to 90 days) |
+| enroll an existing device again, e.g. after reinstalling it (*homelab*) | `catflap invite NAME --replace`: when the device enrolls, its old entry and SSH key are replaced; name and ssh alias stay |
 | show open invites (*homelab*) | `catflap invites` |
 | revoke an open invite (*homelab*) | `catflap invites --revoke NAME` |
 | enroll (*client*) | `catflap enroll cfi1-…` |
 | list devices (*homelab*) | `catflap list` |
 | remove a device (*homelab*) | `catflap remove NAME` |
-| forget a homelab (*client*) | `catflap forget homelab` |
+| forget a homelab (*client*) | `catflap forget ALIAS` (the alias you `ssh` to, by default the homelab's name) |
 | what's set up here (*any*) | `catflap status` |
 
 **Removing a device takes effect immediately:** it's disconnected, its SSH key is removed from
@@ -36,16 +37,21 @@ see [the Telegram bot](#the-telegram-invite-bot)). See also [Security](security.
 
 **Device names** are lowercase letters, digits, `.`, `-` and `_`.
 
-**Enrolling a device again** (e.g. after reinstalling it): `catflap invite NAME --replace` creates
-a re-enroll invite. When the device enrolls with it, its old entry and old SSH key are replaced;
-name and ssh alias stay the same.
+**Long-lived invites** (e.g. `--ttl 30d`, to enroll a device in an emergency) belong in a
+password manager: whoever has one can enroll a device until it's used.
 
-**Enroll options** (*client*):
-- `--alias NAME`: use another SSH alias than the homelab's name (e.g. for two homelabs).
-- `--ssh-key FILE.pub`: authorize a specific SSH key.
-- `--no-ssh-key`: don't send an SSH key (you manage `authorized_keys` yourself).
-- `--no-ssh-config`: don't touch `~/.ssh/config`; use
-  `ssh -o ProxyCommand='catflap proxy homelab' user@homelab` instead.
+### Enroll options
+
+On the client, `catflap enroll` takes:
+
+- `--alias NAME`: the `ssh` alias for this homelab (default: the homelab's name). Useful if the
+  name is taken in your `~/.ssh/config`, or for a second homelab. `add`, `remove`, `rm`, `list`
+  and `ls` can't be aliases (they're `catflap forward` commands).
+- `--ssh-key FILE.pub`: the SSH public key to authorize on the homelab, instead of
+  `~/.ssh/id_ed25519.pub`.
+- `--no-ssh-key`: don't send an SSH key; you manage `authorized_keys` on the homelab yourself.
+- `--no-ssh-config`: don't touch `~/.ssh/config`. Then connect with
+  `ssh -o ProxyCommand='catflap proxy homelab' USER@homelab`.
 
 ## More ports (forwards)
 
@@ -95,13 +101,11 @@ them on the command line) and only adds a channel after its test message got thr
 `catflap notify remove NAME` removes one.
 
 **Tips:**
-- Use two channels, e.g. Telegram and ntfy. An action you take in Telegram is answered there and
-  reported on the *other* channels, so you'd notice if someone else took over your Telegram.
+- Use two channels, e.g. Telegram and ntfy; [Security](security.md#good-habits) explains why.
 - **ntfy.sh:** anyone who knows a topic name can read it there, so keep the random name catflap
   suggests. **Your own ntfy server:** give catflap its own user with write access to one topic
-  only, and use the server's local address if it runs on the homelab (e.g.
-  `http://127.0.0.1:8085`). On iPhones, subscribe with exactly the server's `base-url`, or push
-  won't work.
+  only. iPhone push needs extra server settings, see
+  [Troubleshooting](troubleshooting.md#notifications).
 - **Command channel:** the message comes on stdin, details in `CATFLAP_EVENT`, `CATFLAP_TITLE`,
   `CATFLAP_MESSAGE` and `CATFLAP_PRIORITY`. Example for mail:
   `catflap notify add command --name mail -- sh -c 'mail -s "$CATFLAP_TITLE" you@example.com'`
@@ -137,10 +141,10 @@ rest of the time:
 
 1. Open the window: `/requests on` in the Telegram bot, or `catflap requests on` on the homelab.
    It closes by itself after 1 hour (`/requests on 30m`, `catflap requests on --for 30m`).
-2. On the new device:
+2. On the new device, name the homelab and its relay:
 
    ```sh
-   catflap enroll --request homelab@relay.example.com          # HOMELAB@RELAY
+   catflap enroll --request homelab@relay.example.com
    ```
 
    It shows a 6-digit code, e.g. `731 773`. The device name defaults to its hostname; choose
@@ -159,30 +163,30 @@ device and your homelab (even the relay) swapped them, the codes differ.
   your channels with its code.
 - A request waits up to 10 minutes. The relay allows a few requests per hour per address and
   three at a time per homelab.
-- `enroll --request` takes the same options as an invite (`--alias`, `--ssh-key`, `--no-ssh-key`,
-  `--no-ssh-config`).
+- `enroll --request` takes the same [options](#enroll-options) as an invite.
 
 ## Several homelabs
 
 One client can reach several homelabs; each enrollment adds an entry named after the homelab
 (`--alias` to choose another). Several homelabs can also share one relay: create a join code
-for each with `sudo catflap relay join-code` on the relay.
-
-Each enrollment has its own device key, so sessions to several homelabs on the same relay work
-at the same time. (Enrollments made before v0.3 share one key. If you use two homelabs on the
-same relay at the same time and their sessions disturb each other, enroll one of them again.)
+for each with `sudo catflap relay join-code` on the relay. Sessions to several homelabs work at
+the same time.
 
 ## Upgrading
 
-Run the install command again on each machine. It replaces catflap in place, after verifying the
-download:
+Run the install command again on each machine. It verifies the download and replaces catflap in
+place; running catflap processes keep the old version until they restart.
 
 ```sh
-curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh | sh   # Linux, macOS
-irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex       # Windows
+curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh | sh        # homelab, client (Linux, macOS)
+curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh | sudo sh   # relay (as root)
+irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex            # Windows
 ```
 
-Then restart the service on the homelab and the relay:
+On the relay, run it as root as shown: the relay's service uses `/usr/local/bin/catflap`, and a
+run without root would install a second copy in your home directory instead.
+
+Then restart the services:
 
 ```sh
 catflap restart          # homelab (as your user)
@@ -190,25 +194,26 @@ sudo catflap restart     # relay
 ```
 
 - **Homelab:** open sessions through catflap drop and reconnect in a few seconds. If you run
-  `catflap restart` through catflap itself, it warns you that your session drops. On Windows the
-  installer can replace catflap while the homelab runs it; the restart switches to the new one.
+  `catflap restart` through catflap itself, it warns you that your session drops.
 - **Relay:** connected devices reconnect on their own.
-- **Clients:** nothing to do; the background agent switches to the new version by itself.
+- **Clients:** nothing to do; the catflap agent switches to the new version on the next
+  connection, after open sessions finish.
 - `catflap status` shows the version the homelab is running; `catflap version` the installed one.
 
-Releases: <https://github.com/PaddeK/catflap/releases>. Settings, devices and notification
-channels are kept across upgrades.
+Releases and what changed: [releases page](https://github.com/PaddeK/catflap/releases) and the
+[changelog](../CHANGELOG.md). Settings, devices and notification channels are kept across
+upgrades. To check a download by hand, see [Security](security.md#verifying-a-download).
 
 ## What to back up
 
-| Machine | Files | If lost |
+| Machine | What | If lost |
 |---|---|---|
-| homelab | `~/.config/catflap/homelab.json`, `~/.local/state/catflap/` (state and notification channels; mode 600, contains keys and tokens). Windows: `%LOCALAPPDATA%\catflap\` | set up the homelab again with a new join code and re-enroll every device |
-| relay | one file: `sudo catflap relay backup FILE` | without a backup: set up the relay again, then the homelab (`--force`), then re-enroll every device. With one: [restore it](#moving-the-relay-to-another-server) |
-| client | nothing important | enroll the device again |
+| relay | one file: `sudo catflap relay backup FILE` | with a backup: [restore it](#moving-the-relay-to-another-server) on a new server. Without one: set up the relay again, then the homelab (`catflap setup homelab --join … --force`), then re-enroll every device. |
+| homelab | nothing catflap can restore; a backup of the whole machine brings it back with everything else | set up the homelab again with a new join code (`--force` if old files are left), re-enroll every device and add the notification channels again |
+| client | nothing | enroll the device again |
 
-Keep these backups as private as the machines themselves: they contain keys. Make a new relay
-backup after you set up another homelab on it.
+Keep relay backups as private as the server itself: they contain its private key. Make a new
+backup after you set up another homelab on the relay.
 
 ## Moving the relay to another server
 
@@ -234,8 +239,9 @@ make the backup after setting up homelabs.
 
 ### New hostname or port
 
-The relay's name is part of the address every device stores, so each device enrolls once more.
-The homelab keeps its keys, devices and settings:
+The relay's name and port are part of the address every device stores, so each device enrolls
+once more. (A relay listens on port 443 unless it was set up with `--listen`.) The homelab keeps
+its keys, devices and settings:
 
 1. Set up the new relay ([Getting started](getting-started.md#2-set-up-the-relay)); keep the old
    one running for now. It prints a join code (later ones: `sudo catflap relay join-code`).
@@ -243,7 +249,7 @@ The homelab keeps its keys, devices and settings:
    your session would end before you see the invites):
 
    ```sh
-   catflap homelab move --join cfj1-…-relay.example.com
+   catflap homelab move --join cfj1-…@new-relay.example.com
    ```
 
    It shows what it will do, asks, then registers the homelab with the new relay, removes it from
@@ -266,19 +272,15 @@ sudo catflap uninstall     # on the relay
 It works out what's set up on the machine, shows what it will remove, and asks before doing
 anything (`--yes` skips the question, `--keep-binary` keeps the catflap program itself):
 
-- **Client:** forgets its homelabs (and their `~/.ssh/config` blocks), stops the background
-  agent, deletes this device's keys and settings. Then remove the device on the homelab:
-  `catflap remove NAME`. An SSH key catflap created for you (`~/.ssh/catflap_ed25519`) is kept.
-- **Homelab:** stops and removes the service, removes the homelab from the relay together with
-  its devices and open invites, removes the SSH keys catflap added to `authorized_keys`, and
-  deletes its config, state and notification channels. Its devices can't connect anymore. On
-  Windows, removing the scheduled task may ask for admin rights (UAC).
-- **Relay:** stops and removes the service and the `catflap` system user, and deletes its
-  config, keys and certificates. Every homelab and device using it stops working. Ports it opened
-  in the firewall are listed so you can close them; catflap doesn't close them itself, since
-  other services may need 80 or 443.
-- **The catflap program** goes too, unless something else on the machine still uses it. On
-  Windows its folder is also removed from your PATH.
+- **Client:** forgets its homelabs, including their `~/.ssh/config` blocks, and deletes this
+  device's keys. Then remove the device on the homelab too: `catflap remove NAME`.
+- **Homelab:** removes the service, removes the homelab from the relay with its devices and
+  invites, and removes the SSH keys catflap added. Its devices can't connect anymore. On Windows
+  this asks for admin rights (UAC).
+- **Relay:** removes the service, its system user, config, keys and certificates. Every homelab
+  and device using it stops working. It lists the firewall ports it opened, so you can close
+  them yourself.
+- **The catflap program** goes too, unless something else on the machine still uses it.
 
 To remove only one role on a machine that has several: `catflap uninstall client|homelab|relay`.
 

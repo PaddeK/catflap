@@ -1,5 +1,8 @@
 # Releasing catflap
 
+For maintainers. Users: to upgrade, see [Upgrading](using-catflap.md#upgrading); to check a
+download, see [Verifying a download](security.md#verifying-a-download).
+
 Releases are built by [goreleaser](https://goreleaser.com) in GitHub Actions
 (`.github/workflows/release.yml`) when a `v*` tag is pushed. Nobody builds release
 binaries on their own machine.
@@ -19,13 +22,14 @@ The files are plain binaries, no archives. The checksum covers exactly the file 
 gets installed, and the install scripts need no `tar` or `unzip`. File names carry no
 version, so `releases/latest/download/<file>` always points at the newest release.
 
-Every file in `checksums.txt` also gets a signed **build provenance attestation**
-(Sigstore, keyless, via `actions/attest-build-provenance`). It proves the file was built
-by this repository's release workflow from a specific commit.
+Builds are reproducible: `-trimpath`, file times from the commit, `CGO_ENABLED=0`. Every file
+in `checksums.txt` also gets a signed **build provenance attestation** (Sigstore, keyless, via
+`actions/attest-build-provenance`). It proves the file was built by this repository's release
+workflow from a specific commit.
 
 ## Repository settings
 
-The release process relies on these settings (set since 2026-11-15; check them on a fork):
+The release process relies on these settings; check them on a fork:
 
 - **Public repository.** GitHub build attestations need one (private repositories need
   GitHub Enterprise Cloud).
@@ -39,30 +43,36 @@ The release process relies on these settings (set since 2026-11-15; check them o
   goreleaser creates the release as a draft, uploads everything, then publishes it.
 - **Actions:** the default workflow token is read-only and can't approve pull requests.
   The workflows ask for what they need themselves (`release.yml`: `contents`, `id-token`,
-  `attestations`).
+  `attestations`). Actions are pinned to commit SHAs (version in the comment); bump them
+  deliberately, e.g. with Dependabot, not by moving tags. The release build doesn't use the Go
+  cache.
 - **Security:** Dependabot alerts and security updates, secret scanning with push
   protection, private vulnerability reporting (see [SECURITY.md](../SECURITY.md)).
-  `.github/dependabot.yml` proposes updates for the pinned Actions weekly. Go
-  dependencies are bumped by hand: tailcat and `tailscale.com` must move together.
+  `.github/dependabot.yml` proposes updates for the pinned Actions weekly.
 
-Once tailcat v0.8 is out, switch `go.mod` from the pinned main commit to the tag.
+## Dependencies
+
+Go dependencies are bumped by hand. tailcat and `tailscale.com` must move together: tailcat
+depends on `tailscale.com`, and catflap embeds both. catflap needs tailcat features newer than
+v0.7.0, so `go.mod` pins a commit on tailcat's main branch; switch to the tag once tailcat v0.8
+is released.
 
 ## Cut a release
 
-1. `main` is green in CI (unit tests and `tests/e2e.sh` on amd64 + arm64, release dry run with the install tests on Linux, macOS and Windows). Optionally run `tests/docker.sh` locally.
-2. Tag and push:
+1. `main` is green in CI (all jobs). Optionally run `tests/docker.sh` locally (see
+   [Dry run locally](#dry-run-locally)).
+2. Move the "Unreleased" entries in [CHANGELOG.md](../CHANGELOG.md) under the new version, commit
+   and push.
+3. Tag and push:
 
    ```sh
    git tag -a v1.0.0 -m "catflap v1.0.0"
    git push origin v1.0.0
    ```
 
-3. The release workflow runs the tests, builds all seven targets, publishes the GitHub
-   release with the changelog and attests every file. Check the release page and the
-   workflow summary afterwards.
-
-The Actions in the workflows are pinned to commit SHAs (version in the comment). Bump
-them deliberately, e.g. with Dependabot, not by moving tags.
+4. The release workflow runs the unit tests, builds all seven targets, publishes the GitHub
+   release with install instructions and the commit list, and attests every file. Check the
+   release page and the workflow summary afterwards.
 
 ## Dry run locally
 
@@ -74,30 +84,3 @@ tests/install.sh dist                   # install.sh against those files, incl. 
 tests/docker.sh dist                    # install.sh on several distros + e2e with the amd64, arm64 and 32-bit ARM binaries (Docker)
 # Windows: powershell -ExecutionPolicy Bypass -File tests\install.ps1 dist
 ```
-
-## Verify a download by hand
-
-```sh
-sha256sum --check --ignore-missing checksums.txt
-gh attestation verify catflap_linux_amd64 --repo PaddeK/catflap
-```
-
-The install scripts check the SHA-256 against `checksums.txt` from the same release.
-That catches broken and swapped downloads in transit. It can't catch a swapped release,
-because `checksums.txt` would be swapped with it. Immutable releases and the attestation
-cover that case.
-
-## Upgrade a running setup
-
-Run the install script again. It replaces the binary in place, and running processes
-keep the old file until they restart:
-
-- **Clients:** nothing to do. The client agent notices the new build on the next
-  connection, lets open sessions finish and hands over to a fresh agent.
-- **Homelab:** `catflap restart`. This cuts open sessions through catflap, including the one
-  you may be typing in (catflap warns you then); reconnect after a few seconds.
-  `catflap status` shows the running version.
-- **Relay:** `curl -fsSL …/install.sh | sudo sh`, then `sudo catflap restart`.
-  Connected devices reconnect on their own.
-
-`catflap version` shows the version, the commit and the embedded tailcat and Tailscale versions.

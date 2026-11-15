@@ -113,7 +113,7 @@ func Relay(ctx context.Context, o RelayOptions) (string, error) {
 	active := isActive("catflap-relay")
 	if !active {
 		if err := portFree("tcp", cfg.Listen); err != nil {
-			return "", fmt.Errorf("%v\n    another program (an old derper?) is using it; stop it first", err)
+			return "", fmt.Errorf("%v\n    another program (a web server, another relay?) is using it; stop it first", err)
 		}
 	}
 

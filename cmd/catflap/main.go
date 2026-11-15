@@ -35,10 +35,10 @@ var version = "dev"
 const usage = `catflap - reach your homelab from anywhere, on your own relay
 
 Setup (once per machine):
-  catflap setup relay --hostname derp.example.com     on the VPS (as root)
+  catflap setup relay --hostname relay.example.com    on the VPS (as root)
   catflap setup homelab --join <join-code>            on the homelab
   catflap enroll <invite>                             on each client
-  catflap enroll --request HOMELAB             ... or without invite: tap to approve
+  catflap enroll --request HOMELAB@RELAY       ... or without invite: tap to approve
 
 Homelab administration:
   catflap invite <name> [--ttl 15m]    create a one-time invite for a device
@@ -74,6 +74,7 @@ Other:
   catflap restart [relay|homelab]      restart the service, e.g. after an upgrade
   catflap uninstall [relay|homelab|client]   remove catflap from this machine (asks first)
   catflap version
+  catflap <command> -h                 show the options of a command
 
 Daemons (started by the service manager):
   catflap relay run [--config FILE]
@@ -87,6 +88,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "catflap:", err)
 		os.Exit(1)
 	}
@@ -225,7 +229,7 @@ func cmdSetupRelay(ctx context.Context, args []string) error {
 		}
 		backup = b
 	} else if cfg.Hostname == "" {
-		return errors.New("--hostname is required, e.g. catflap setup relay --hostname derp.example.com")
+		return errors.New("--hostname is required, e.g. catflap setup relay --hostname relay.example.com")
 	}
 	code, err := setup.Relay(ctx, setup.RelayOptions{Config: cfg, NoFirewall: *noFW, Restore: backup, Force: *force, Out: os.Stdout})
 	if err != nil {
@@ -754,7 +758,7 @@ func cmdEnroll(ctx context.Context, args []string) error {
 	fs.StringVar(&o.SSHKeyFile, "ssh-key", "", "SSH public key (.pub) to authorize (default: ~/.ssh/id_ed25519.pub or a new key)")
 	fs.BoolVar(&o.NoSSHKey, "no-ssh-key", false, "don't send an SSH key")
 	fs.BoolVar(&o.NoSSHConfig, "no-ssh-config", false, "don't write ~/.ssh/config")
-	fs.StringVar(&o.Request, "request", "", "no invite: ask HOMELAB to approve this device (tap to approve)")
+	fs.StringVar(&o.Request, "request", "", "no invite: ask the homelab to approve this device, as HOMELAB@RELAY (tap to approve)")
 	fs.StringVar(&o.Name, "name", "", "device name to ask for, with --request (default: from the hostname)")
 	pos, err := parse(fs, args)
 	if err != nil {
@@ -765,7 +769,7 @@ func cmdEnroll(ctx context.Context, args []string) error {
 	case o.Request == "" && len(pos) == 1 && o.Name == "":
 		o.Invite = pos[0]
 	default:
-		return errors.New("usage: catflap enroll <invite> [--alias NAME] [--ssh-key FILE.pub]\n       catflap enroll --request HOMELAB [--name DEVICE] [--alias NAME]")
+		return errors.New("usage: catflap enroll <invite> [--alias NAME] [--ssh-key FILE.pub]\n       catflap enroll --request HOMELAB@RELAY [--name DEVICE] [--alias NAME]")
 	}
 	o.Out = os.Stdout
 	return client.Enroll(ctx, o)

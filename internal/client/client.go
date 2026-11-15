@@ -168,7 +168,7 @@ func Enroll(ctx context.Context, o EnrollOptions) error {
 			break
 		}
 		if time.Now().After(deadline) {
-			return errors.New("no answer from the homelab within 2 minutes; is `catflap homelab` running? (the invite stays valid until it expires, just run enroll again)")
+			return errors.New("no answer from the homelab within 2 minutes; is the homelab running? (`catflap status` there; the invite stays valid until it expires, just run enroll again)")
 		}
 		select {
 		case <-ctx.Done():

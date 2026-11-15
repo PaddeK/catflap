@@ -131,6 +131,14 @@ main() {
 			echo "the homelab still runs the old version; restart it with: catflap restart"
 			echo "(this cuts open sessions through catflap, including the one you may be using now)"
 		fi
+		if [ "$(id -u)" != 0 ] && [ -z "${CATFLAP_INSTALL_DIR:-}" ] && systemctl is-active --quiet catflap-relay 2>/dev/null; then
+			echo "note: this machine runs the catflap relay, which uses /usr/local/bin/catflap;"
+			echo "to upgrade it, run the installer as root: curl -fsSL ... | sudo sh"
+		fi
+	fi
+	if [ "$(uname -s)" = Darwin ] && launchctl print "gui/$(id -u)/catflap.homelab" >/dev/null 2>&1; then
+		echo "the homelab still runs the old version; restart it with: catflap restart"
+		echo "(this cuts open sessions through catflap, including the one you may be using now)"
 	fi
 }
 

@@ -2,22 +2,62 @@
 
 Reach your homelab from anywhere through **your own relay**, with one binary.
 
-catflap builds on [tailcat](https://github.com/tailscale/tailcat), Tailscale's control-plane-free
-WireGuard tunnel. It embeds tailcat and Tailscale's DERP relay server, adds an allowlist at every
-hop, and replaces "copy keys around by hand" with one-time invite codes.
+You run a small relay on a cheap VPS. Your homelab connects out to it, so it needs no open
+ports and no router changes. Your laptop and other devices connect through the relay and reach
+the homelab over an end-to-end encrypted WireGuard tunnel, directly when the network allows.
+After setup, `ssh homelab` works from any network.
 
-> **Status: early releases (v0.x).** It works and is in daily use. Every change runs the end-to-end
-> tests on Linux (amd64 and arm64), the homelab service on Linux, macOS and Windows, and the install
-> tests on all three. Expect rough edges.
-> Not affiliated with Tailscale.
+- **No account anywhere.** No coordination service, no third party: you run the relay yourself.
+- **Adding a device takes one invite code;** removing it takes effect immediately.
+- **Only what you choose is reachable:** SSH by default, more ports when you add them.
+- **You hear about everything:** new devices, failed attempts and more, on your phone.
 
-## Documentation
+catflap builds on [tailcat](https://github.com/tailscale/tailcat), Tailscale's library for a
+WireGuard tunnel between two machines without a Tailscale account or coordination server. It
+bundles tailcat with Tailscale's relay server (DERP) and adds invites, alerts and an allowlist on
+top. Not affiliated with Tailscale.
 
-- **[Getting started](docs/getting-started.md)**: relay, homelab and first device, step by step
-- **[Using catflap](docs/using-catflap.md)**: devices, more ports, phone alerts and the Telegram bot, upgrades, backups, moving the relay
-- **[Troubleshooting](docs/troubleshooting.md)**: logs and common problems
-- **[Security](docs/security.md)**: what protects your homelab, and what to do if something is lost
-- [Design](docs/design.md) and [releasing](docs/releasing.md), for the technical details
+> **Status: early releases (v0.x).** In daily use and tested in CI on Linux, macOS and Windows.
+> Expect rough edges; see the [changelog](CHANGELOG.md).
+
+## What you need
+
+- A small **Linux VPS** with a public IPv4 address and a **DNS name** pointing to it, for the
+  relay. 1 vCPU and 512 MB RAM are plenty.
+- The **machine at home** you want to reach (the "homelab"): Linux with systemd, macOS or
+  Windows, with an SSH server or another service you want to reach. A Raspberry Pi works.
+- **Devices** to connect from: Linux, macOS or Windows, with the OpenSSH client (built in on all
+  three).
+
+## Quick look
+
+```
+catflap setup relay --hostname relay.example.com   # on the VPS (as root)
+  -> prints: catflap setup homelab --join cfj1-…
+
+catflap setup homelab --join cfj1-…                # on the homelab (your normal user)
+catflap invite laptop                              # on the homelab
+  -> prints: catflap enroll cfi1-…
+
+catflap enroll cfi1-…                              # on the laptop
+ssh homelab                                        # done
+```
+
+More ports, e.g. a web UI on port 1880:
+
+```
+catflap forward add 1880                           # on the homelab (live, no restart)
+catflap forward homelab 1880                       # on the laptop -> http://localhost:1880
+```
+
+Alerts on your phone, and a Telegram bot to invite or remove devices when you're away:
+
+```
+catflap notify add telegram                        # on the homelab: link your chat
+  -> in Telegram: /invite laptop                   # one-time invite, valid 15 minutes
+```
+
+The full walkthrough is in [Getting started](docs/getting-started.md).
 
 ## Install
 
@@ -33,100 +73,43 @@ Windows (PowerShell; installs to `%LOCALAPPDATA%\Programs\catflap` and adds it t
 irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex
 ```
 
-Both scripts verify the download against the release's `checksums.txt` and install
-nothing on a mismatch. Run them again to upgrade, then `catflap restart` on a homelab or relay. You can also download a binary from the
-[releases page](https://github.com/PaddeK/catflap/releases) and check its signed build
-attestation: `gh attestation verify catflap_linux_amd64 --repo PaddeK/catflap`.
-See [docs/releasing.md](docs/releasing.md) for details.
+Both scripts verify the download against the release's checksums and install nothing on a
+mismatch. Every release file also has a signed build attestation; see
+[Verifying a download](docs/security.md#verifying-a-download). To upgrade, run the script again:
+see [Upgrading](docs/using-catflap.md#upgrading).
 
-## How it works (short)
+| Role | Platforms |
+|---|---|
+| relay | Linux (amd64, arm64, 32-bit ARM) with systemd |
+| homelab | Linux with systemd, macOS, Windows |
+| client | Linux, macOS, Windows |
 
-The full walkthrough is in [Getting started](docs/getting-started.md).
+Binaries: Linux amd64, arm64 and 32-bit ARM (ARMv6 and later, so every Raspberry Pi), macOS
+Apple silicon and Intel, Windows amd64 and arm64.
 
-```
-catflap setup relay --hostname derp.example.com    # on a small VPS (as root)
-  -> prints: catflap setup homelab --join cfj1-…
+## How it keeps your homelab safe
 
-catflap setup homelab --join cfj1-…                # on the homelab (normal user)
-catflap invite laptop                               # on the homelab
-  -> prints: catflap enroll cfi1-…
+- **Three checks for every connection:** the relay only admits devices your homelab told it
+  about, the homelab only answers enrolled devices, and the SSH server still wants your key.
+- **The homelab decides, not the relay.** The relay passes encrypted traffic it can't read. Even
+  someone who took over the relay can't add a device to your homelab.
+- **Invites can't be hijacked in transit.** The invite's secret never reaches the relay, so
+  nobody in between can swap in their own device.
+- **Nothing is opened on the homelab.** It only makes outgoing connections, also for alerts and
+  the Telegram bot.
 
-catflap enroll cfi1-…                               # on the laptop
-ssh homelab                                         # done
-```
+Details: [Security](docs/security.md) for users, [the design](docs/design.md) for the technical
+model.
 
-More ports, e.g. Node-RED:
+## Documentation
 
-```
-catflap forward add 1880                            # on the homelab (live, no restart)
-catflap forward homelab 1880                        # on the laptop -> http://localhost:1880
-```
-
-Alerts on your phone, and a Telegram bot for new devices when you're away:
-
-```
-catflap notify add telegram                         # on the homelab: link your chat
-  -> in Telegram: /invite laptop                    # one-time invite, valid 15 minutes
-catflap notify add ntfy                             # optional second channel for alerts
-```
-
-- **One port.** DERP, STUN and the enrollment API run in one process. Clients only need TCP 443
-  (plus UDP for direct paths when available).
-- **Invites, not side channels.** The invite secret never reaches the relay. The homelab checks a
-  MAC over the device's keys and answers with an encrypted reply. A compromised relay can't add
-  devices or read your homelab's address. No invite at hand? A new device can ask, and you
-  approve it with a tap in Telegram after comparing a 6-digit code.
-- **Only what you forward.** Port 22 by default; `catflap forward add` opens more, live. Every
-  other port is refused.
-- **Know what happens.** Every enrollment, removal and invite, and every failed enrollment,
-  shows up on your phone (ntfy, Pushover, Telegram or a command of your choice). The Telegram bot
-  answers `/invite`, `/list` and `/remove` from your chat only; nothing is opened on the homelab.
-- **Three gates.** Relay admission, the homelab's live tailcat allowlist, and SSH keys. `catflap
-  remove` closes all three immediately; no restarts.
-- **Platforms.** Relay: Linux. Homelab and clients: Linux amd64/arm64/32-bit ARM (homelab with systemd),
-  macOS arm64/amd64, Windows amd64/arm64. Raspberry Pi works as homelab or client (64-bit OS: arm64;
-  32-bit OS: ARMv6+ build).
-
-See [Security](docs/security.md) for what this means in practice, and [the design](docs/design.md) for the details.
-
-## Build and test
-
-Requires Go 1.27+.
-
-```sh
-go build -o catflap ./cmd/catflap
-go test ./...
-tests/e2e.sh          # relay + homelab + clients on this machine, incl. attack cases
-```
-
-Release builds: see [docs/releasing.md](docs/releasing.md).
-
-## Layout
-
-```
-cmd/catflap/          CLI
-internal/codes/       invite/join codes, HKDF, MAC, sealed replies
-internal/api/         relay HTTP API types + client
-internal/relay/       embedded DERP + STUN + TLS + admission + enrollment API
-internal/homelab/     embedded tailcat server, relay agent, control socket, Telegram bot
-internal/client/      enroll, ssh ProxyCommand, ssh config, client agent
-internal/notify/      notification channels (ntfy, Pushover, Telegram, command)
-internal/setup/       services (systemd, launchd, Windows Task Scheduler), service user, firewall
-internal/osutil/      Windows admin rights and ACLs
-tests/e2e.sh          end-to-end test
-tests/systemd.sh      setup, restart, move, uninstall under real systemd (container)
-tests/service.sh      the homelab service on macOS and Windows (CI runners)
-tests/install.sh      install.sh against a goreleaser snapshot (install.ps1: Windows)
-tests/docker.sh       install.sh on several distros + e2e on amd64, arm64, ARMv7, ARMv6, in Docker
-tests/fakeservices.py fake Telegram/ntfy/Pushover for the e2e test
-install.sh            installer for Linux/macOS
-install.ps1           installer for Windows
-.goreleaser.yaml      release build
-.github/workflows/    CI and release (with build attestations)
-docs/getting-started.md, using-catflap.md, troubleshooting.md, security.md   user guides
-docs/design.md        design and security model
-docs/releasing.md     releases, verification, upgrades
-```
+- **[Getting started](docs/getting-started.md)**: relay, homelab and first device, step by step
+- **[Using catflap](docs/using-catflap.md)**: devices, more ports, alerts and the Telegram bot,
+  upgrades, backups, moving the relay
+- **[Troubleshooting](docs/troubleshooting.md)**: logs and common problems
+- **[Security](docs/security.md)**: what protects you, and what to do if something is lost
+- [Design](docs/design.md), [releasing](docs/releasing.md) and [contributing](CONTRIBUTING.md),
+  for developers
 
 ## License
 
