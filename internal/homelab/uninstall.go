@@ -105,11 +105,18 @@ func Uninstall(ctx context.Context, p Paths, keysDone bool) (UninstallResult, er
 	if !keysDone {
 		res.KeysRemoved, res.KeysErr = removeDeviceKeys(cfg, st.Devices)
 	}
-	for _, f := range []string{p.State, p.Notify, p.Socket, p.Config, p.Log, p.Log + ".1"} {
+	for _, f := range []string{p.State, p.Notify, p.Socket, p.Config} {
 		if err := os.Remove(f); err == nil {
 			res.FilesRemoved = append(res.FilesRemoved, f)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return res, err
+		}
+	}
+	// The service log (macOS, Windows): best effort. On Windows the stopped
+	// process may hold it open a moment longer.
+	for _, f := range []string{p.Log, p.Log + ".1"} {
+		if removeSoon(f, 5*time.Second) {
+			res.FilesRemoved = append(res.FilesRemoved, f)
 		}
 	}
 	// Remove the directories if catflap's files were all that was in them
@@ -120,4 +127,20 @@ func Uninstall(ctx context.Context, p Paths, keysDone bool) (UninstallResult, er
 		}
 	}
 	return res, nil
+}
+
+// removeSoon removes a file, retrying while it is in use, and reports
+// whether it was there and is gone.
+func removeSoon(f string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		err := os.Remove(f)
+		if err == nil {
+			return true
+		}
+		if errors.Is(err, fs.ErrNotExist) || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
