@@ -1,0 +1,55 @@
+# Release build: goreleaser release --clean (run by .github/workflows/release.yml on a v* tag).
+# Local dry run:  goreleaser release --snapshot --clean   (needs a git checkout)
+version: 2
+project_name: catflap
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: catflap
+    main: ./cmd/catflap
+    binary: catflap
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    # Same input, same bytes: the file times come from the commit, not the build machine.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    targets:
+      - linux_amd64_v1
+      - linux_arm64
+      # 32-bit ARM built for ARMv6: runs on ARMv6 and ARMv7, i.e. every Raspberry Pi
+      # with a 32-bit OS, including Pi 1, Zero and Zero W.
+      - linux_arm_6
+      - darwin_arm64
+      - windows_amd64_v1
+      - windows_arm64
+
+# Plain binaries, no archives: the checksum covers exactly the file that gets installed,
+# and the install scripts need no tar/unzip.
+archives:
+  - formats: [binary]
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+  extra_files:
+    - glob: install.sh
+    - glob: install.ps1
+
+release:
+  extra_files:
+    - glob: install.sh
+    - glob: install.ps1
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
+
+changelog:
+  use: github
+  sort: asc

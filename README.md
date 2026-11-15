@@ -1,0 +1,104 @@
+# catflap
+
+Reach your homelab from anywhere through **your own relay**, with one binary.
+
+catflap builds on [tailcat](https://github.com/tailscale/tailcat), Tailscale's control-plane-free
+WireGuard tunnel. It embeds tailcat and Tailscale's DERP relay server, adds an allowlist at every
+hop, and replaces "copy keys around by hand" with one-time invite codes.
+
+> **Status: v1 in development.** The core works and passes the local end-to-end test.
+> Release builds and install scripts are ready; the user docs are next ([milestones](docs/design.md#milestones)).
+> Not affiliated with Tailscale.
+
+## Install
+
+Linux and macOS (installs to `~/.local/bin`, or `/usr/local/bin` as root):
+
+```sh
+curl -fsSL https://github.com/PaddeK/catflap/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell; installs to `%LOCALAPPDATA%\Programs\catflap` and adds it to your PATH):
+
+```powershell
+irm https://github.com/PaddeK/catflap/releases/latest/download/install.ps1 | iex
+```
+
+Both scripts verify the download against the release's `checksums.txt` and install
+nothing on a mismatch. Run them again to upgrade. You can also download a binary from the
+[releases page](https://github.com/PaddeK/catflap/releases) and check its signed build
+attestation: `gh attestation verify catflap_linux_amd64 --repo PaddeK/catflap`.
+See [docs/releasing.md](docs/releasing.md) for details.
+
+## How it works (short)
+
+```
+catflap setup relay --hostname derp.example.com    # on a small VPS (as root)
+  -> prints: catflap setup homelab --join cfj1-…
+
+catflap setup homelab --join cfj1-…                # on the homelab (normal user)
+catflap invite laptop                               # on the homelab
+  -> prints: catflap enroll cfi1-…
+
+catflap enroll cfi1-…                               # on the laptop
+ssh homelab                                         # done
+```
+
+More ports, e.g. Node-RED:
+
+```
+catflap forward add 1880                            # on the homelab (live, no restart)
+catflap forward homelab 1880                        # on the laptop -> http://localhost:1880
+```
+
+- **One port.** DERP, STUN and the enrollment API run in one process. Clients only need TCP 443
+  (plus UDP for direct paths when available).
+- **Invites, not side channels.** The invite secret never reaches the relay. The homelab checks a
+  MAC over the device's keys and answers with an encrypted reply. A compromised relay can't add
+  devices or read your homelab's address.
+- **Only what you forward.** Port 22 by default; `catflap forward add` opens more, live. Every
+  other port is refused.
+- **Three gates.** Relay admission, the homelab's live tailcat allowlist, and SSH keys. `catflap
+  remove` closes all three immediately; no restarts.
+- **Platforms.** Relay: Linux. Homelab: Linux (systemd). Clients: macOS arm64, Linux amd64/arm64/32-bit ARM,
+  Windows amd64/arm64. Raspberry Pi works as homelab or client (64-bit OS: arm64; 32-bit OS: ARMv6+ build).
+
+Read [docs/design.md](docs/design.md) for the full design and security model.
+
+## Build and test
+
+Requires Go 1.27+.
+
+```sh
+go build -o catflap ./cmd/catflap
+go test ./...
+tests/e2e.sh          # relay + homelab + clients on this machine, incl. attack cases
+```
+
+Release builds: see [docs/releasing.md](docs/releasing.md).
+
+## Layout
+
+```
+cmd/catflap/          CLI
+internal/codes/       invite/join codes, HKDF, MAC, sealed replies
+internal/api/         relay HTTP API types + client
+internal/relay/       embedded DERP + STUN + TLS + admission + enrollment API
+internal/homelab/     embedded tailcat server, relay agent, control socket
+internal/client/      enroll, ssh ProxyCommand, ssh config
+internal/setup/       systemd units, service user, firewall
+tests/e2e.sh          end-to-end test
+tests/install.sh      install.sh against a goreleaser snapshot (install.ps1: Windows)
+tests/docker.sh       install.sh on several distros + e2e on amd64, arm64, ARMv7, ARMv6, in Docker
+install.sh            installer for Linux/macOS
+install.ps1           installer for Windows
+.goreleaser.yaml      release build
+.github/workflows/    CI and release (with build attestations)
+docs/design.md        design and security model
+docs/releasing.md     releases, verification, upgrades
+```
+
+## License
+
+BSD 3-Clause, see [LICENSE](LICENSE). catflap embeds [tailcat](https://github.com/tailscale/tailcat)
+and [Tailscale](https://github.com/tailscale/tailscale) code, which are BSD-3-Clause as well.

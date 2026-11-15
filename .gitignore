@@ -1,0 +1,15 @@
+# Your own values and notes - never commit these
+config.env
+local/
+
+# build output
+/catflap
+/dist/
+*.exe
+__pycache__/
+
+# editor
+.idea/
+
+# the old prototype, kept locally only
+/legacy/
