@@ -14,7 +14,6 @@ case "$(uname -s)" in
 Darwin) OS=mac EXE= ;;
 MINGW* | MSYS* | CYGWIN*)
 	OS=win EXE=.exe
-	export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' # pass /Query etc. through as they are
 	;;
 *) echo "macOS or Windows (Git Bash) only; on Linux use tests/systemd.sh" >&2; exit 2 ;;
 esac
@@ -50,7 +49,7 @@ cleanup() {
 		pkill -f "$T/" 2> /dev/null
 	else
 		certutil -delstore Root catflap-service-test > /dev/null 2>&1
-		taskkill /F /IM catflap.exe > /dev/null 2>&1 # leftover client agents
+		MSYS_NO_PATHCONV=1 taskkill /F /IM catflap.exe > /dev/null 2>&1 # leftover client agents
 	fi
 	wait 2> /dev/null
 	rm -rf "$T"
@@ -72,9 +71,9 @@ else
 fi
 
 echo "== trusted test certificate + fake sshd"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=catflap-service-test \
+MSYS_NO_PATHCONV=1 openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=catflap-service-test \
 	-addext subjectAltName=IP:127.0.0.1 -addext extendedKeyUsage=serverAuth \
-	-keyout "$T/key.pem" -out "$T/cert.pem" 2> "$T/openssl.log" || { cat "$T/openssl.log"; exit 1; }
+	-keyout "$(nat "$T/key.pem")" -out "$(nat "$T/cert.pem")" 2> "$T/openssl.log" || { cat "$T/openssl.log"; exit 1; }
 if [ $OS = mac ]; then
 	# Trust settings want a GUI confirmation since macOS 11, unless allowed:
 	sudo security authorizationdb write com.apple.trust-settings.admin allow || true
@@ -127,7 +126,7 @@ tunnel() { # one round trip through the homelab's tunnel
 }
 started() { "$CF" status 2> /dev/null | grep -o 'running catflap [^,]*'; }
 service_loaded() {
-	if [ $OS = mac ]; then launchctl print "gui/$(id -u)/catflap.homelab" > /dev/null 2>&1; else schtasks /Query /TN catflap-homelab > /dev/null 2>&1; fi
+	if [ $OS = mac ]; then launchctl print "gui/$(id -u)/catflap.homelab" > /dev/null 2>&1; else MSYS_NO_PATHCONV=1 schtasks /Query /TN catflap-homelab > /dev/null 2>&1; fi
 }
 
 echo "== relay"
@@ -142,7 +141,7 @@ if [ $OS = mac ]; then
 	check "LaunchAgent plist written" test -f "$HOME/Library/LaunchAgents/catflap.homelab.plist"
 	check "LaunchAgent runs homelab run --service" bash -c "launchctl print gui/$(id -u)/catflap.homelab | grep -q -- '--service'"
 else
-	schtasks /Query /TN catflap-homelab /XML > "$T/task.xml" 2>&1
+	MSYS_NO_PATHCONV=1 schtasks /Query /TN catflap-homelab /XML > "$T/task.xml" 2>&1
 	check "task starts at boot, as the user without a password (S4U)" bash -c "tr -d '\0' < '$T/task.xml' | grep -q BootTrigger && tr -d '\0' < '$T/task.xml' | grep -q '<LogonType>S4U</LogonType>'"
 	check "task runs elevated for an admin account" bash -c "tr -d '\0' < '$T/task.xml' | grep -q '<RunLevel>HighestAvailable</RunLevel>'"
 	check "the output names the admin keys file" grep -q 'administrators_authorized_keys' "$T/setup.log"
