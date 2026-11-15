@@ -51,6 +51,14 @@ catflap forward add 1880                            # on the homelab (live, no r
 catflap forward homelab 1880                        # on the laptop -> http://localhost:1880
 ```
 
+Alerts on your phone, and a Telegram bot for new devices when you're away:
+
+```
+catflap notify add telegram                         # on the homelab: link your chat
+  -> in Telegram: /invite laptop                    # one-time invite, valid 15 minutes
+catflap notify add ntfy                             # optional second channel for alerts
+```
+
 - **One port.** DERP, STUN and the enrollment API run in one process. Clients only need TCP 443
   (plus UDP for direct paths when available).
 - **Invites, not side channels.** The invite secret never reaches the relay. The homelab checks a
@@ -58,6 +66,9 @@ catflap forward homelab 1880                        # on the laptop -> http://lo
   devices or read your homelab's address.
 - **Only what you forward.** Port 22 by default; `catflap forward add` opens more, live. Every
   other port is refused.
+- **Know what happens.** Every enrollment, removal and invite, and every failed enrollment,
+  shows up on your phone (ntfy, Pushover, Telegram or a command of your choice). The Telegram bot
+  answers `/invite`, `/list` and `/remove` from your chat only; nothing is opened on the homelab.
 - **Three gates.** Relay admission, the homelab's live tailcat allowlist, and SSH keys. `catflap
   remove` closes all three immediately; no restarts.
 - **Platforms.** Relay: Linux. Homelab: Linux (systemd). Clients: macOS arm64, Linux amd64/arm64/32-bit ARM,
@@ -84,12 +95,14 @@ cmd/catflap/          CLI
 internal/codes/       invite/join codes, HKDF, MAC, sealed replies
 internal/api/         relay HTTP API types + client
 internal/relay/       embedded DERP + STUN + TLS + admission + enrollment API
-internal/homelab/     embedded tailcat server, relay agent, control socket
-internal/client/      enroll, ssh ProxyCommand, ssh config
+internal/homelab/     embedded tailcat server, relay agent, control socket, Telegram bot
+internal/client/      enroll, ssh ProxyCommand, ssh config, client agent
+internal/notify/      notification channels (ntfy, Pushover, Telegram, command)
 internal/setup/       systemd units, service user, firewall
 tests/e2e.sh          end-to-end test
 tests/install.sh      install.sh against a goreleaser snapshot (install.ps1: Windows)
 tests/docker.sh       install.sh on several distros + e2e on amd64, arm64, ARMv7, ARMv6, in Docker
+tests/fakeservices.py fake Telegram/ntfy/Pushover for the e2e test
 install.sh            installer for Linux/macOS
 install.ps1           installer for Windows
 .goreleaser.yaml      release build

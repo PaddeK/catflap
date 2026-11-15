@@ -42,6 +42,10 @@ Homelab administration:
   catflap forward add <port>[=host:port]   make a port reachable through the tunnel
   catflap forward remove <port>        close it again (cuts open connections)
   catflap forward list                 show reachable ports (default: 22 only)
+  catflap notify add telegram|ntfy|pushover|command
+                                       security alerts on your phone; Telegram adds
+                                       the invite bot (/invite, /list, /remove)
+  catflap notify list | remove <name> | test [name]
 
 Client:
   catflap forward <alias> [local:]<port>   open localhost:<port> to a forwarded homelab port
@@ -126,6 +130,8 @@ func run(ctx context.Context, args []string) error {
 		return client.RunAgent(ctx)
 	case "forward", "fwd":
 		return cmdForward(ctx, args)
+	case "notify":
+		return cmdNotify(ctx, args)
 	case "forget":
 		return cmdForget(args)
 	case "status":
@@ -301,6 +307,10 @@ func cmdRelay(ctx context.Context, args []string) error {
 }
 
 func adminErr(err error) error {
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		return err // the relay answered; its message is the error
+	}
 	if errors.Is(err, os.ErrPermission) || strings.Contains(err.Error(), "permission denied") {
 		return errors.New("permission denied: run this as root (sudo)")
 	}
@@ -321,6 +331,11 @@ func control() (*api.Client, error) {
 }
 
 func ctlErr(err error) error {
+	var ae *api.Error
+	if errors.As(err, &ae) {
+		return errors.New(ae.Msg) // the homelab answered; show just its message
+	}
+	// Only failures to reach the socket mean the daemon isn't running.
 	if strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "connection refused") {
 		return errors.New("the homelab is not running here (systemctl --user status catflap)")
 	}

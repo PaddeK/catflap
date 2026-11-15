@@ -69,6 +69,9 @@ type Invite struct {
 	// Used is set once a device redeemed the invite but the relay hasn't
 	// confirmed the result yet; the result is re-sent until it has.
 	Used *UsedInvite `json:"used,omitempty"`
+	// TelegramMessage is the invite bot's message showing the code, edited
+	// once the invite is used and deleted when it expires or is revoked.
+	TelegramMessage int64 `json:"telegram_message,omitempty"`
 }
 
 // UsedInvite remembers an approval until the relay has it.
@@ -81,6 +84,7 @@ type UsedInvite struct {
 // Paths are the homelab's files.
 type Paths struct {
 	Config, State, Socket string
+	Notify                string // notification channels incl. tokens (600)
 }
 
 // DefaultPaths returns the file locations. CATFLAP_DIR puts everything in
@@ -91,6 +95,7 @@ func DefaultPaths() (Paths, error) {
 			Config: filepath.Join(d, "homelab.json"),
 			State:  filepath.Join(d, "homelab-state.json"),
 			Socket: filepath.Join(d, "control.sock"),
+			Notify: filepath.Join(d, "notify.json"),
 		}, nil
 	}
 	home, err := os.UserHomeDir()
@@ -109,6 +114,7 @@ func DefaultPaths() (Paths, error) {
 		Config: filepath.Join(cfg, "catflap", "homelab.json"),
 		State:  filepath.Join(st, "catflap", "homelab-state.json"),
 		Socket: filepath.Join(st, "catflap", "control.sock"),
+		Notify: filepath.Join(st, "catflap", "notify.json"),
 	}, nil
 }
 

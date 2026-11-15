@@ -218,6 +218,61 @@ OUT=$(printf 'x\n' | timeout 40 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 9999
 check "forward survives a homelab restart ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake"
 check "client refuses reserved alias" bash -c "env CATFLAP_DIR=$T/c4 '$CF' enroll '$($H "$CF" invite c4 | grep -o 'cfi1-[^ ]*')' --alias list 2>&1 | grep -q reserved"
 
+echo "== notifications and the Telegram bot (fake services)"
+python3 -I tests/fakeservices.py serve "$T/fake.port" > "$T/fake.log" 2>&1 &
+PIDS+=($!)
+for _ in $(seq 50); do [ -s "$T/fake.port" ] && break; sleep 0.1; done
+FAKE="http://127.0.0.1:$(cat "$T/fake.port")"
+fake() { python3 -I tests/fakeservices.py "$FAKE" "$@"; }
+
+# Prompts are answered from stdin: server, topic, access token (none).
+printf '%s\n%s\n\n' "$FAKE/ntfy" catflap-e2e | $H "$CF" notify add ntfy > "$T/ntfy.log" 2>&1
+check "notify add ntfy: test message arrives" fake has ntfy "notifications are on"
+check "a channel that fails its test is not added" bash -c "printf 'http://127.0.0.1:1\nx\n\n' | $H '$CF' notify add ntfy --name broken 2>&1 | grep -q 'test message failed' && ! $H '$CF' notify list | grep -q '^broken'"
+
+# Telegram: token from stdin, then the bot waits for "/start <code>".
+printf '123:TESTTOKEN\ny\n' | $H "$CF" notify add telegram --api-url "$FAKE/tg" > "$T/tg.log" 2>&1 &
+TGADD=$!
+for _ in $(seq 100); do grep -q 'start=' "$T/tg.log" && break; sleep 0.1; done
+CODE=$(grep -o 'start=[a-z0-9]*' "$T/tg.log" | head -1 | cut -d= -f2)
+fake update 999 "/start wrongcode"      # someone else racing to link first
+fake update 4242 "/start $CODE"
+wait $TGADD || true
+check "telegram links the chat that sent the code" grep -q 'linked to @u4242 (id 4242)' "$T/tg.log"
+check "token never shown" bash -c "! grep -q TESTTOKEN '$T/tg.log' && ! $H '$CF' notify list | grep -q TESTTOKEN"
+check "notify list shows the bot" bash -c "$H '$CF' notify list | grep -q '@testbot, chat 4242, answers /invite'"
+check "notify.json is private" bash -c "[ \$(stat -c %a '$T/homelab/notify.json') = 600 ]"
+
+fake update 4242 "/invite tgdev"
+check "bot replies with an invite" fake has tg "catflap enroll cfi1-"
+TGINV=$(fake invite)
+mkdir -p "$T/c5"; ssh-keygen -q -t ed25519 -N "" -C c5 -f "$T/c5/id"
+client c5 enroll "$TGINV" --ssh-key "$T/c5/id.pub" > "$T/c5.log" 2>&1 || true
+check "device enrolls with the bot's invite" grep -q 'Approved: this device is "tgdev"' "$T/c5.log"
+check "bot replaces the code once it's used" fake has tg "was used"
+check "alert on the other channel: new device" fake has ntfy "new device: tgdev"
+check "alert: invite created via the bot" fake has ntfy "created via the Telegram bot"
+check "no echo of the bot's own invite to Telegram" bash -c "! python3 -I tests/fakeservices.py '$FAKE' has tg 'invite created for tgdev' --now"
+
+fake update 999 "/invite evil"
+check "alert: a stranger wrote to the bot" fake has ntfy "someone else wrote to your Telegram bot"
+check "the stranger got no invite" bash -c "! $H '$CF' invites | grep -q evil"
+
+INV6=$($H "$CF" invite c6 | grep -o 'cfi1-[^ ]*')
+TAMPERED6=$(python3 -I -c 'import sys; s=sys.argv[1]; b,r=s.split("@"); k,i,x=b.split("-"); x=("b" if x[0]!="b" else "c")+x[1:]; print(f"{k}-{i}-{x}@{r}")' "$INV6")
+client c3 enroll "$TAMPERED6" --ssh-key "$T/c3/id.pub" > /dev/null 2>&1 || true
+check "alert: failed enrollment" fake has ntfy "failed enrollment"
+
+fake update 4242 "/remove tgdev"
+check "bot asks before removing" fake has tg "loses access immediately"
+fake button 4242 "$(fake callback rm:)"
+check "bot edits the question into the result" fake has tg "Removed <b>tgdev</b>: disconnected"
+check "device removed from the phone" bash -c "! $H '$CF' list | grep -q '^tgdev'"
+check "alert: device removed via the bot" fake has ntfy "tgdev was removed via the Telegram bot"
+check "notify test reaches every channel" $H "$CF" notify test
+$H "$CF" notify remove telegram > /dev/null
+check "notify remove" bash -c "! $H '$CF' notify list | grep -q telegram"
+
 echo
 echo "passed $pass, failed $fail"
 if [ $fail -gt 0 ]; then

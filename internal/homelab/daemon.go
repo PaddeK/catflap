@@ -18,6 +18,7 @@ import (
 	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/fsutil"
+	"github.com/PaddeK/catflap/internal/notify"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
@@ -41,6 +42,12 @@ type Daemon struct {
 
 	fwdMu sync.Mutex
 	fwds  map[int]*forward // live forwards by tunnel port
+
+	disp     *notify.Dispatcher // alerts to the channels in notify.json
+	notifyMu sync.Mutex
+	ncfg     notify.Config
+	bot      *bot // Telegram invite bot, if a channel runs it
+	botStop  context.CancelFunc
 }
 
 // Run starts the homelab daemon and blocks until ctx is done.
@@ -64,6 +71,8 @@ func Run(ctx context.Context, p Paths) error {
 		logf:  log.Printf,
 		wake:  make(chan struct{}, 1),
 	}
+	d.disp = notify.NewDispatcher(d.logf)
+	defer d.disp.Close()
 	for _, dev := range st.Devices {
 		var k key.NodePublic
 		if err := k.UnmarshalText([]byte(dev.NodeKey)); err == nil {
@@ -97,6 +106,10 @@ func Run(ctx context.Context, p Paths) error {
 
 	if err := d.serveControl(ctx); err != nil {
 		return err
+	}
+	if err := d.loadNotify(ctx); err != nil {
+		// Run without alerts rather than not at all, but say so loudly.
+		d.logf("notify: %v; NOTIFICATIONS ARE OFF until this is fixed", err)
 	}
 	d.agentLoop(ctx)
 	return nil
@@ -173,6 +186,8 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 	d.mu.Unlock()
 
 	backoff := time.Second
+	var down time.Time // first failure of the current outage
+	alerted := false
 	for ctx.Err() == nil {
 		d.pruneInvites()
 		d.mu.Lock()
@@ -190,6 +205,14 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 				return
 			}
 			d.logf("agent: relay: %v (retrying in %v)", err, backoff)
+			if down.IsZero() {
+				down = time.Now()
+			}
+			if !alerted && time.Since(down) >= relayDownAlert {
+				alerted = true
+				d.alert(notify.Message{Event: "relay.down", Title: "relay unreachable", Priority: notify.High,
+					Body: fmt.Sprintf("The homelab has not reached the relay %s for %d minutes, so devices can't connect. Last error: %v", d.cfg.Relay, int(relayDownAlert.Minutes()), err)}, "")
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -199,6 +222,11 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 			backoff = min(backoff*2, time.Minute)
 			continue
 		}
+		if alerted {
+			d.alert(notify.Message{Event: "relay.up", Title: "relay reachable again",
+				Body: fmt.Sprintf("The relay %s is reachable again after %s.", d.cfg.Relay, time.Since(down).Round(time.Minute))}, "")
+		}
+		down, alerted = time.Time{}, false
 		backoff = time.Second
 		for _, s := range ev.Submissions {
 			d.handleSubmission(ctx, s)
@@ -239,18 +267,38 @@ func (d *Daemon) sync(ctx context.Context) error {
 
 func (d *Daemon) pruneInvites() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var gone []Invite
 	n := len(d.st.Invites)
 	d.st.Invites = slices.DeleteFunc(d.st.Invites, func(inv Invite) bool {
-		return inv.Used == nil && time.Now().After(inv.Expires)
+		expired := inv.Used == nil && time.Now().After(inv.Expires)
+		if expired && inv.TelegramMessage != 0 {
+			gone = append(gone, inv)
+		}
+		return expired
 	})
 	if len(d.st.Invites) != n {
 		d.saveLocked()
+	}
+	d.mu.Unlock()
+	if b := d.currentBot(); b != nil {
+		for _, inv := range gone {
+			go b.inviteGone(inv.TelegramMessage, inv.Name)
+		}
 	}
 }
 
 func (d *Daemon) reject(ctx context.Context, s api.Submission, reason string, closeInvite bool) {
 	d.logf("enroll: rejected submission from %s: %s", s.Source, reason)
+	d.mu.Lock()
+	name := "an unknown invite"
+	for _, inv := range d.st.Invites {
+		if inv.ID == s.InviteID {
+			name = fmt.Sprintf("the invite for %q", inv.Name)
+		}
+	}
+	d.mu.Unlock()
+	d.alert(notify.Message{Event: "enroll.failed", Title: "failed enrollment", Priority: notify.High,
+		Body: fmt.Sprintf("A device at %s tried to enroll with %s and was refused: %s.", s.Source, name, reason)}, "")
 	err := d.relay.Do(ctx, "POST", "/v1/agent/result", api.ResultRequest{
 		InviteID: s.InviteID, SubmissionID: s.SubmissionID, Reason: reason, CloseInvite: closeInvite,
 	}, nil)
@@ -351,6 +399,17 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 	}
 	d.mu.Unlock()
 	d.logf("enroll: added device %q (%s, from %s)", inv.Name, nk.ShortString(), s.Source)
+	host := ""
+	if h := sanitize(r.Hostname); h != "" {
+		host = " (hostname " + h + ")"
+	}
+	d.alert(notify.Message{Event: "device.enrolled", Title: "new device: " + inv.Name, Priority: notify.High,
+		Body: fmt.Sprintf("%s%s enrolled from %s. If that wasn't you, remove it: %s", inv.Name, host, s.Source, d.removeHint(inv.Name))}, "")
+	if inv.TelegramMessage != 0 {
+		if b := d.currentBot(); b != nil {
+			go b.inviteUsed(inv.TelegramMessage, inv.Name, sanitize(r.Hostname))
+		}
+	}
 	d.sendApproval(ctx, inv, s)
 }
 
@@ -440,7 +499,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 			ctlErr(w, http.StatusBadRequest, "bad request")
 			return
 		}
-		res, err := d.createInvite(r.Context(), req.Name, req.TTL)
+		res, err := d.createInvite(r.Context(), req.Name, req.TTL, "")
 		if err != nil {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -475,7 +534,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		ctlJSON(w, out)
 	})
 	mux.HandleFunc("DELETE /devices/{name}", func(w http.ResponseWriter, r *http.Request) {
-		res, err := d.removeDevice(r.Context(), r.PathValue("name"))
+		res, err := d.removeDevice(r.Context(), r.PathValue("name"), "")
 		if err != nil {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -528,6 +587,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		}
 		ctlJSON(w, struct{}{})
 	})
+	d.notifyRoutes(ctx, mux)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -538,7 +598,9 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	return nil
 }
 
-func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duration) (InviteResult, error) {
+// createInvite makes a one-time invite. origin is the channel the request
+// came from ("" = command line).
+func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duration, origin string) (InviteResult, error) {
 	if !ValidName(name) {
 		return InviteResult{}, fmt.Errorf("invalid name %q: use lowercase letters, digits, '.', '-' or '_'", name)
 	}
@@ -578,6 +640,8 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 		return InviteResult{}, err
 	}
 	d.logf("invite: created for %q, valid until %s", name, exp.Format(time.RFC3339))
+	d.alert(notify.Message{Event: "invite.created", Title: "invite created for " + name,
+		Body: fmt.Sprintf("One-time invite for %q created %s, valid until %s.", name, via(origin), when(exp))}, origin)
 	return InviteResult{Code: c.String(), Name: name, Expires: exp}, nil
 }
 
@@ -588,12 +652,16 @@ func (d *Daemon) revokeInvite(ctx context.Context, idOrName string) error {
 		d.mu.Unlock()
 		return fmt.Errorf("no open invite %q", idOrName)
 	}
-	id := d.st.Invites[i].ID
+	inv := d.st.Invites[i]
+	id := inv.ID
 	d.st.Invites = slices.Delete(d.st.Invites, i, i+1)
 	err := d.saveLocked()
 	d.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	if b := d.currentBot(); b != nil && inv.TelegramMessage != 0 {
+		go b.inviteGone(inv.TelegramMessage, inv.Name)
 	}
 	// Even if this fails, the homelab no longer accepts the invite.
 	if err := d.relay.Do(ctx, "DELETE", "/v1/agent/invites/"+id, nil, nil); err != nil {
@@ -615,8 +683,9 @@ type RemoveResult struct {
 	SSHKeyKept bool `json:"ssh_key_kept"`
 }
 
-// removeDevice closes all three gates for a device.
-func (d *Daemon) removeDevice(ctx context.Context, name string) (RemoveResult, error) {
+// removeDevice closes all three gates for a device. origin is the channel
+// the request came from ("" = command line).
+func (d *Daemon) removeDevice(ctx context.Context, name string, origin string) (RemoveResult, error) {
 	var res RemoveResult
 	d.mu.Lock()
 	i := slices.IndexFunc(d.st.Devices, func(dev Device) bool { return dev.Name == name })
@@ -646,6 +715,8 @@ func (d *Daemon) removeDevice(ctx context.Context, name string) (RemoveResult, e
 		res.SSHKeyKept = !removed && dev.SSHKey != "" && hasAuthorizedKey(path, dev.SSHKey)
 	}
 	d.logf("remove: device %q removed", name)
+	d.alert(notify.Message{Event: "device.removed", Title: "device removed: " + name,
+		Body: fmt.Sprintf("%s was removed %s and disconnected.", name, via(origin))}, origin)
 	if err := d.sync(ctx); err != nil {
 		d.logf("remove: relay sync failed, will retry: %v", err)
 		d.nudge()
@@ -683,4 +754,20 @@ func Control(p Paths) *api.Client {
 	c.Base = "http://homelab"
 	c.HTTP = &http.Client{Transport: tr, Timeout: 60 * time.Second}
 	return c
+}
+
+// relayDownAlert is how long the relay must be unreachable before an alert.
+const relayDownAlert = 10 * time.Minute
+
+// setInviteMessage remembers the bot message that shows an open invite.
+func (d *Daemon) setInviteMessage(name string, msg int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := range d.st.Invites {
+		if d.st.Invites[i].Name == name && d.st.Invites[i].Used == nil {
+			d.st.Invites[i].TelegramMessage = msg
+			d.saveLocked()
+			return
+		}
+	}
 }

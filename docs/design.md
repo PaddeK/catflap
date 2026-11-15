@@ -100,12 +100,28 @@ Residual risks (documented for users):
 - **An invite is a bearer secret until it's used.** Whoever enrolls first with it gets the slot, which is why invites are short-lived, one use and bound to a name. `catflap list` shows every device. `catflap invites` lists and revokes open invites.
 - **Break-glass invites** (`--ttl 30d`) are for a password manager only.
 
-### Optional push approval (v1.1, plugin)
+### Notifications and the Telegram invite bot (v0.2)
 
-For "new laptop, no trusted device at hand". It's off by default, and the relay accepts invite-less requests only for agents that enabled it.
-- `catflap enroll --request <homelab>@relay.example.com` queues a request. The client and the homelab each compute the **pairing code** (from the prototype) from the keys on their own.
-- The homelab sends a notification through a **notifier plugin**: ntfy first (ported from the prototype), more later. Telegram is a good fit because the bot long-polls outward from the homelab, so the approval never passes through the relay.
-- Same design as the prototype: one-time approval token, the relay sees only its hash, and the agent uses its own copy of the keys.
+For "new laptop, away from home, only my phone at hand", and to notice when something happens that you didn't do.
+
+The prototype's lesson: the notification is easy, **the way back is hard**. Its ntfy Approve button called the homelab, which needed a self-hosted ntfy, a Cloudflare tunnel and ntfy.sh for iOS push. v0.2 opens nothing: every channel is an outgoing HTTPS request from the homelab, and the bot long-polls Telegram.
+
+- **Channels** (`catflap notify add …`, homelab only): `ntfy` (ntfy.sh or your own server; a random topic name is suggested because ntfy.sh topics are readable by name; optional access token), `pushover`, `telegram`, and `command` (runs a program of your choice, no shell, with the message on stdin and `CATFLAP_EVENT/TITLE/MESSAGE/PRIORITY` in the environment, e.g. for mail). Channels are compiled in; a "plugin" is a channel type in the config.
+  - Stored in `notify.json` next to the homelab state (600, it holds tokens). Tokens are only ever read from a prompt or stdin, never from the command line, and never printed.
+  - A channel goes live only after its test message got through (`notify add` sends one; `notify test` re-checks all).
+  - Messages go out in the background with three attempts per message, so a broken channel never holds up the homelab. Errors never contain the Telegram URL (it holds the bot token).
+- **Alerts**, to every channel: device enrolled (high priority, with the remove command), device removed, invite created, **failed enrollment** (tampered, expired or reused invite: someone trying something), relay unreachable for 10 minutes and reachable again, and a stranger writing to the bot. A request that came from the bot is answered in Telegram, so its alert goes only to the other channels.
+- **Telegram invite bot** (flow B): `/invite <name>`, `/invites`, `/revoke <name>`, `/list`, `/remove <name>`, `/status`.
+  - **One chat only.** `notify add telegram` links the chat that opens `t.me/<bot>?start=<one-time code>`; a stranger can't link instead. Everyone else is ignored, and the first message per stranger per hour triggers a high-priority alert on all channels.
+  - Bot invites are valid for **15 minutes**. The reply shows `catflap enroll <code>` in a code block (tap to copy). Once used, the bot edits the message to "used"; when the invite expires or is revoked, it deletes the message.
+  - `/remove` asks first (inline buttons, valid 5 minutes, single use): a stolen laptop can be cut off from the phone in seconds.
+  - Commands that arrived while the homelab was offline (older than 2 minutes) are not executed; the bot says so.
+  - **What Telegram sees:** bot chats aren't end-to-end encrypted, so Telegram can read the invite. It works once, for 15 minutes, and is deleted after use. A Telegram account takeover could mint invites, which is why the alerts on your other channels matter: configure ntfy or Pushover too, and you see every invite and enrollment there.
+  - Nothing changes on the relay or the clients.
+
+### Tap-to-approve enrollment (later, flow A)
+
+Same need, phone UX without copying a code: the laptop runs `catflap enroll --request <homelab>@relay.example.com`, your phone shows "laptop wants to join, code 482913 [Approve]" through any channel above, and the Approve link goes to the relay (the relay stores only the token's hash; the homelab learns of the approval by polling the relay). The client and the homelab each compute the **pairing code** from the keys. It needs a public request endpoint on the relay with rate limits, so it comes after the invite bot has proven itself; off by default.
 
 ### Removal
 
@@ -140,6 +156,8 @@ catflap remove NAME
 catflap forward add PORT[=HOST:PORT]... # live, no restart; target default 127.0.0.1:PORT
 catflap forward remove PORT...          # also cuts open connections on that port
 catflap forward list
+catflap notify add telegram|ntfy|pushover|command [--name N]   # prompts for tokens
+catflap notify list | remove NAME | test [NAME]
 
 catflap enroll INVITE [--alias homelab] [--ssh-key FILE.pub] [--no-ssh-config]
 catflap proxy ALIAS [PORT]              # ssh ProxyCommand: stdio <-> homelab port (default 22)
@@ -170,8 +188,9 @@ catflap version
   - Forwards are saved in `homelab.json`; only its `forwards` key is rewritten, so other hand edits survive. An explicit `"forwards": {}` means no ports at all.
   - A target may be another machine in the homelab's LAN (`8080=192.168.1.50:80`). Only enrolled devices can reach any forward; the homelab connects to the target as itself.
 - Agent loop: long-polls the relay for submissions, verifies, admits, retries queued revocations.
-- Control socket (`~/.local/state/catflap/control.sock`, mode 600) for `invite`, `invites`, `list`, `remove`, `forward`, `status`. The daemon is the only writer of its state.
-- Files: `~/.config/catflap/homelab.json` (settings: relay, forwards), `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, agent token, devices, invites).
+- Control socket (`~/.local/state/catflap/control.sock`, mode 600) for `invite`, `invites`, `list`, `remove`, `forward`, `notify`, `status`. The daemon is the only writer of its state.
+- Notifications and the Telegram bot run inside the daemon (see [above](#notifications-and-the-telegram-invite-bot-v02)).
+- Files: `~/.config/catflap/homelab.json` (settings: relay, forwards), `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, agent token, devices, invites), `~/.local/state/catflap/notify.json` (600: notification channels and their tokens).
 
 ### Client
 
@@ -231,6 +250,7 @@ Details and the release checklist: [releasing.md](releasing.md).
   - an unknown key is rejected by the relay
   - the client agent: two sessions at once both keep working, a reconnect right after a session is fast, the no-agent fallback works, devices recover after a homelab restart
   - forwards: a port is unreachable until `forward add`, the client `forward` listener reaches it, `forward remove` cuts an open connection and blocks new ones, forwards survive a restart
+  - notifications, against fake Telegram/ntfy services (`tests/fakeservices.py`): a channel only goes live after its test message, Telegram links only the chat that sent the one-time code, the token is never shown, `/invite` gives a working invite and the message is edited once used, alerts go to the other channels (not echoed to Telegram), a stranger gets nothing and triggers an alert, a tampered enrollment triggers an alert, `/remove` with its confirm button removes the device
 - **Install tests** (`tests/install.sh`, `tests/install.ps1`): the install scripts against a goreleaser snapshot served on localhost: install, upgrade over a running catflap (Windows: locked exe moved aside, cleaned up later), tampered binary and missing checksum refused (existing file untouched), missing release; Windows also checks the PATH entry and its registry type, and restores your PATH afterwards.
 - **Docker platform test** (`tests/docker.sh`, local, needs Docker with arm64 emulation): `install.sh` on Alpine (busybox wget), Debian (wget / no downloader), Ubuntu and Fedora, amd64, arm64 and 32-bit ARM (v6, v7), as root and as a normal user, checking the right binary was picked; then the end-to-end test with the amd64, arm64, ARMv7 (Debian) and ARMv6 (Alpine) release binaries (`CATFLAP_BIN`). Emulation doesn't enforce ARMv6-only instructions; `GOARM=6` does.
 - CI (`.github/workflows/ci.yml`): `go vet`, unit tests and the end-to-end test on amd64 and native arm64 runners; a release dry run (goreleaser snapshot of all six targets) with the install tests on Linux, macOS and Windows (PowerShell 5.1 and 7), plus shellcheck.
@@ -240,4 +260,5 @@ Details and the release checklist: [releasing.md](releasing.md).
 1. **Core:** codes + crypto, relay (DERP + API), homelab daemon, client enroll/proxy, local e2e test.
 2. **Setup commands and distribution:** systemd units, `catflap` system user, firewall, linger; install scripts; goreleaser; CI and attested releases. *(done; first published release pending)*
 3. **Docs:** rewrite README + docs for v1.
-4. **v1.1:** push-approval plugin (ntfy), macOS homelab (launchd).
+4. **v0.2:** notifications (ntfy, Pushover, Telegram, command) and the Telegram invite bot.
+5. **Later:** tap-to-approve enrollment (flow A), macOS homelab (launchd).

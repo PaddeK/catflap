@@ -163,7 +163,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "github.com/PaddeK/catflap/"+Version)
+	req.Header.Set("User-Agent", "catflap/"+Version)
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
