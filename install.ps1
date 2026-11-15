@@ -67,8 +67,14 @@
         }
         Write-Host 'checksum ok'
 
-        $new = & $file version | Select-Object -First 1
-        if ($LASTEXITCODE -ne 0 -or -not $new) { throw 'catflap install: the downloaded binary does not run on this machine' }
+        # Read all output before looking at it: `| Select-Object -First 1` would stop
+        # catflap mid-run and leave a random exit code.
+        $out = @(& $file version)
+        $code = $LASTEXITCODE
+        $new = $out | Select-Object -First 1
+        if ($code -ne 0 -or -not $new) {
+            throw "catflap install: the downloaded binary does not run on this machine (exit code $code)"
+        }
 
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $dst = Join-Path $dir 'catflap.exe'

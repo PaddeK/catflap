@@ -88,7 +88,7 @@ try {
 
     Write-Host '== install.ps1'
     Check 'installs the release binary' { (Inst good) -match 'checksum ok' }
-    Check 'installed binary runs' { (& $dst version | Select-Object -First 1) -like 'catflap *' }
+    Check 'installed binary runs' { $v = @(& $dst version); $LASTEXITCODE -eq 0 -and $v[0] -like 'catflap *' }
     Check 'installed file matches checksums.txt' { (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower() -eq $want }
     Check 'install dir added to the user PATH' {
         (($key.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -split ';') -contains $dir)
