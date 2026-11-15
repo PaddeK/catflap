@@ -17,6 +17,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/client"
 	"github.com/PaddeK/catflap/internal/fsutil"
@@ -56,10 +58,13 @@ Client:
 Relay administration (as root):
   catflap relay join-code [--ttl 1h]   create a join code for another homelab
   catflap relay status                 show registered homelabs and devices
+  catflap relay remove <homelab>       forget a homelab that's gone (uninstall does this itself)
+  catflap relay backup FILE            back up the relay (move it with setup relay --restore FILE)
 
 Other:
   catflap status                       show what is set up on this machine
   catflap restart [relay|homelab]      restart the service, e.g. after an upgrade
+  catflap uninstall [relay|homelab|client]   remove catflap from this machine (asks first)
   catflap version
 
 Daemons (started by systemd):
@@ -140,6 +145,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdStatus(ctx)
 	case "restart":
 		return cmdRestart(ctx, args)
+	case "uninstall":
+		return cmdUninstall(ctx, args)
 	}
 	return fmt.Errorf("unknown command %q (see `catflap help`)", cmd)
 }
@@ -179,15 +186,38 @@ func cmdSetupRelay(ctx context.Context, args []string) error {
 	fs.StringVar(&cfg.CertFile, "cert", "", "certificate file (cert-mode manual)")
 	fs.StringVar(&cfg.KeyFile, "key", "", "key file (cert-mode manual)")
 	noFW := fs.Bool("no-firewall", false, "don't touch ufw/firewalld")
+	restore := fs.String("restore", "", "set the relay up from a backup file (made with: catflap relay backup), e.g. on a new server")
+	force := fs.Bool("force", false, "with --restore: replace a relay that is set up here already")
 	if _, err := parse(fs, args); err != nil {
 		return err
 	}
-	if cfg.Hostname == "" {
+	var backup *relay.Backup
+	if *restore != "" {
+		b, err := relay.ReadBackup(*restore)
+		if err != nil {
+			return err
+		}
+		if cfg.Hostname != "" && cfg.Hostname != b.Config.Hostname {
+			return fmt.Errorf("the backup is for %s; a restore keeps the hostname, because homelabs and devices know the relay by it", b.Config.Hostname)
+		}
+		backup = b
+	} else if cfg.Hostname == "" {
 		return errors.New("--hostname is required, e.g. catflap setup relay --hostname derp.example.com")
 	}
-	code, err := setup.Relay(ctx, setup.RelayOptions{Config: cfg, NoFirewall: *noFW, Out: os.Stdout})
+	code, err := setup.Relay(ctx, setup.RelayOptions{Config: cfg, NoFirewall: *noFW, Restore: backup, Force: *force, Out: os.Stdout})
 	if err != nil {
 		return err
+	}
+	if backup != nil {
+		fmt.Printf(`
+Relay %s is restored and running (backup from %s).  Logs: journalctl -u catflap-relay -f
+
+Now point the DNS records of %s to this server. Homelabs and devices
+reconnect on their own once DNS has updated; then remove the old relay
+(sudo catflap uninstall on the old server).
+
+`, backup.Config.Hostname, backup.Created.Local().Format("2006-01-02 15:04"), backup.Config.Hostname)
+		return nil
 	}
 	fmt.Printf(`
 Relay is running.  Logs: journalctl -u catflap-relay -f
@@ -258,12 +288,14 @@ func (f *forwardFlag) Set(s string) error {
 
 func cmdRelay(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: catflap relay run|join-code|status")
+		return errors.New("usage: catflap relay run|join-code|status|remove|backup")
 	}
 	fs := newFlags("relay " + args[0])
 	cfgPath := fs.String("config", relay.DefaultConfigPath, "relay config file")
 	ttl := fs.Duration("ttl", time.Hour, "join code lifetime (join-code)")
-	if _, err := parse(fs, args[1:]); err != nil {
+	yes := fs.Bool("yes", false, "don't ask for confirmation (remove)")
+	pos, err := parse(fs, args[1:])
+	if err != nil {
 		return err
 	}
 	cfg, err := relay.LoadConfig(*cfgPath)
@@ -271,6 +303,26 @@ func cmdRelay(ctx context.Context, args []string) error {
 		return err
 	}
 	switch args[0] {
+	case "backup":
+		if len(pos) != 1 {
+			return errors.New("usage: sudo catflap relay backup FILE")
+		}
+		b, err := relay.WriteBackup(cfg, pos[0])
+		if err != nil {
+			return adminErr(err)
+		}
+		fmt.Printf(`Backup of relay %s written to %s: %d homelab(s).
+
+It contains the relay's private key: keep it as private as the server.
+Restore it on a new server with:  sudo catflap setup relay --restore FILE
+Homelabs set up after this backup aren't in it; make a new backup then.
+`, cfg.Hostname, pos[0], len(b.Homelabs()))
+		return nil
+	case "remove", "rm":
+		if len(pos) != 1 {
+			return errors.New("usage: sudo catflap relay remove <homelab name or id> [--yes]")
+		}
+		return cmdRelayRemove(ctx, cfg, pos[0], *yes)
 	case "run":
 		return relay.Run(ctx, cfg)
 	case "join-code":
@@ -322,6 +374,103 @@ func adminErr(err error) error {
 		return errors.New("the relay is not running (systemctl status catflap-relay)")
 	}
 	return err
+}
+
+// cmdRelayRemove removes a homelab from the relay: for homelabs that are gone
+// without `catflap uninstall` (which de-registers by itself).
+func cmdRelayRemove(ctx context.Context, cfg relay.Config, which string, yes bool) error {
+	var st struct {
+		Agents []struct {
+			ID, Name string
+			Created  time.Time
+			Clients  map[string]string
+		}
+	}
+	if err := relay.AdminClient(cfg).Do(ctx, "GET", "/status", nil, &st); err != nil {
+		return adminErr(err)
+	}
+	type match = struct {
+		ID, Name string
+		Created  time.Time
+		Clients  map[string]string
+	}
+	var found []match
+	for _, a := range st.Agents {
+		if a.ID == which || a.Name == which {
+			found = append(found, match(a))
+		}
+	}
+	switch len(found) {
+	case 0:
+		return fmt.Errorf("no homelab %q on this relay (see: sudo catflap relay status)", which)
+	case 1:
+	default:
+		var ids []string
+		for _, f := range found {
+			ids = append(ids, fmt.Sprintf("%s (since %s)", f.ID, f.Created.Format("2006-01-02")))
+		}
+		return fmt.Errorf("%d homelabs are called %q; pick one by id: %s", len(found), which, strings.Join(ids, ", "))
+	}
+	h := found[0]
+	fmt.Printf("homelab %q (id %s, since %s) with %d device(s)\n", h.Name, h.ID, h.Created.Format("2006-01-02"), len(h.Clients))
+	fmt.Println("Removing it from the relay stops it and its devices from using this relay.")
+	if !yes && !confirm("Remove it?") {
+		return errors.New("cancelled")
+	}
+	if err := relay.AdminClient(cfg).Do(ctx, "DELETE", "/agents/"+h.ID, nil, nil); err != nil {
+		return adminErr(err)
+	}
+	fmt.Printf("removed homelab %q from the relay.\nConnections it still has end when they reconnect; `sudo catflap restart` ends them now.\n", h.Name)
+	return nil
+}
+
+// confirm asks a yes/no question on the terminal; without one, it's a no.
+func confirm(question string) bool {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		fmt.Println("(no terminal to confirm on; add --yes)")
+		return false
+	}
+	return newPrompter().yes(question, false)
+}
+
+// cmdUninstall removes what catflap set up on this machine.
+func cmdUninstall(ctx context.Context, args []string) error {
+	fs := newFlags("uninstall")
+	yes := fs.Bool("yes", false, "don't ask for confirmation")
+	keep := fs.Bool("keep-binary", false, "keep the catflap program itself")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	role := ""
+	switch len(pos) {
+	case 0:
+	case 1:
+		role = pos[0]
+	default:
+		return errors.New("usage: catflap uninstall [relay|homelab|client] [--yes] [--keep-binary]")
+	}
+	plan, err := setup.PlanUninstall(role, *keep)
+	if err != nil {
+		return err
+	}
+	if plan.Empty() {
+		msg := "nothing of catflap is set up here"
+		if plan.RelaySkipped {
+			msg += " for this user; the relay needs root: sudo catflap uninstall relay"
+		}
+		if plan.BinaryKeptNote != "" {
+			msg += "\n" + plan.BinaryKeptNote
+		}
+		fmt.Println(msg)
+		return nil
+	}
+	plan.Describe(os.Stdout)
+	fmt.Println()
+	if !*yes && !confirm("This can't be undone. Continue?") {
+		return errors.New("cancelled, nothing was changed")
+	}
+	return setup.Uninstall(ctx, plan, os.Stdout)
 }
 
 // ---- homelab admin ----
@@ -668,6 +817,8 @@ func cmdRestart(ctx context.Context, args []string) error {
 			hasHomelab = fsutil.Exists(p.Config)
 		}
 		switch {
+		case hasRelay && hasHomelab && os.Geteuid() != 0:
+			role = "homelab" // the relay needs root anyway
 		case hasRelay && hasHomelab:
 			return errors.New("both a relay and a homelab are set up here: catflap restart relay|homelab")
 		case hasRelay:

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -126,6 +127,9 @@ func TestTelegram(t *testing.T) {
 }
 
 func TestCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses sh")
+	}
 	out := filepath.Join(t.TempDir(), "out")
 	ch := Channel{Name: "c", Type: TypeCommand, Command: []string{"sh", "-c", `{ echo "$CATFLAP_EVENT|$CATFLAP_PRIORITY|$CATFLAP_TITLE"; cat; } > "$0"`, out}}
 	if err := ch.Send(context.Background(), Message{Event: "device.enrolled", Title: "new device: x", Body: "body", Priority: High}); err != nil {

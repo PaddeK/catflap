@@ -28,6 +28,18 @@ jobs:
       - name: end-to-end test (relay + homelab + clients on this runner)
         run: tests/e2e.sh
 
+  # setup, restart and uninstall under real systemd, in a throwaway container
+  systemd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: tests/systemd.sh
+
   # All six release targets build, the goreleaser config is valid, and the install
   # scripts install the snapshot on each OS (incl. the tamper checks).
   release-dry-run:
@@ -49,8 +61,11 @@ jobs:
           distribution: goreleaser
           version: v2.20.2
           args: release --snapshot --clean
+      - if: runner.os != 'Linux'
+        name: unit tests on this OS
+        run: go test ./...
       - if: runner.os == 'Linux'
-        run: shellcheck install.sh tests/install.sh tests/docker.sh
+        run: shellcheck install.sh tests/install.sh tests/docker.sh tests/systemd.sh
       - if: runner.os != 'Windows'
         run: tests/install.sh dist
       - if: runner.os == 'Windows'

@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,10 +81,15 @@ WantedBy=default.target
 type RelayOptions struct {
 	Config     relay.Config
 	NoFirewall bool
-	Out        io.Writer
+	// Restore sets the relay up from a backup (`--restore`): its config and
+	// state replace Config, and no join code is created.
+	Restore *relay.Backup
+	Force   bool // restore over an existing relay state
+	Out     io.Writer
 }
 
-// Relay installs and starts the relay service and returns a join code.
+// Relay installs and starts the relay service and returns a join code
+// (none for a restore).
 func Relay(ctx context.Context, o RelayOptions) (string, error) {
 	out := o.Out
 	if runtime.GOOS != "linux" {
@@ -96,6 +102,16 @@ func Relay(ctx context.Context, o RelayOptions) (string, error) {
 		return "", errors.New("setup relay needs systemd")
 	}
 	cfg := o.Config
+	if o.Restore != nil {
+		cfg = o.Restore.Config
+		if cfg.CertMode == "manual" { // the certificate comes from the backup
+			cfg.CertFile = filepath.Join(filepath.Dir(relay.DefaultConfigPath), "cert.pem")
+			cfg.KeyFile = filepath.Join(filepath.Dir(relay.DefaultConfigPath), "key.pem")
+		}
+		if fsutil.Exists(cfg.StatePath()) && !o.Force {
+			return "", fmt.Errorf("a relay is already set up here (%s); restoring replaces it and every homelab registered with it. Add --force to do that", cfg.StatePath())
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return "", err
 	}
@@ -132,6 +148,14 @@ func Relay(ctx context.Context, o RelayOptions) (string, error) {
 		}
 	}
 
+	if b := o.Restore; b != nil {
+		step("restoring the relay state from the backup")
+		if err := restoreFiles(b, cfg); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(out, "    %d homelab(s): %s\n", len(b.Homelabs()), strings.Join(b.Homelabs(), ", "))
+	}
+
 	step("writing " + relay.DefaultConfigPath)
 	if err := os.MkdirAll(filepath.Dir(relay.DefaultConfigPath), 0o755); err != nil {
 		return "", err
@@ -164,6 +188,12 @@ func Relay(ctx context.Context, o RelayOptions) (string, error) {
 
 	// Wait for the admin socket, then ask the daemon for a join code.
 	adm := relay.AdminClient(cfg)
+	if o.Restore != nil {
+		if !waitFor(20*time.Second, func() bool { return adm.Do(ctx, "GET", "/status", nil, nil) == nil }) {
+			return "", errors.New("relay did not come up (see: journalctl -u catflap-relay)")
+		}
+		return "", nil
+	}
 	var resp struct{ Code string }
 	deadline := time.Now().Add(20 * time.Second)
 	for {
@@ -177,6 +207,37 @@ func Relay(ctx context.Context, o RelayOptions) (string, error) {
 		return "", fmt.Errorf("relay did not come up: %v (see: journalctl -u catflap-relay)", err)
 	}
 	return resp.Code, nil
+}
+
+// restoreFiles writes the backup's state (and certificate) where the relay
+// service expects them, owned by its user.
+func restoreFiles(b *relay.Backup, cfg relay.Config) error {
+	u, err := user.Lookup("catflap")
+	if err != nil {
+		return err
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return err
+	}
+	os.Chown(cfg.StateDir, uid, gid)
+	if err := fsutil.WriteFile(cfg.StatePath(), b.State, 0o600); err != nil {
+		return err
+	}
+	os.Chown(cfg.StatePath(), uid, gid)
+	if cfg.CertMode == "manual" {
+		if err := os.MkdirAll(filepath.Dir(cfg.CertFile), 0o755); err != nil {
+			return err
+		}
+		for path, data := range map[string]string{cfg.CertFile: b.CertPEM, cfg.KeyFile: b.KeyPEM} {
+			if err := fsutil.WriteFile(path, []byte(data), 0o640); err != nil {
+				return err
+			}
+			os.Chown(path, 0, gid) // readable by the relay's group only
+		}
+	}
+	return nil
 }
 
 func openFirewall(out io.Writer, cfg relay.Config) {

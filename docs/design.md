@@ -125,6 +125,8 @@ Same need, phone UX without copying a code: the laptop runs `catflap enroll --re
 
 ### Removal
 
+A homelab removes itself from the relay (`DELETE /v1/agent`, authenticated with its agent token) on `catflap uninstall` and before `setup homelab --force` replaces it; the relay drops the record, its devices at gate 1 and its open invites. `sudo catflap relay remove` does the same from the relay's side, for homelabs that are gone.
+
 `catflap remove <name>` on the homelab removes the key from the live allowlist and calls `DisconnectClient` (gate 2, immediate). It also removes the `authorized_keys` line (gate 3) and calls `POST /v1/agent/revoke` (gate 1). If the relay is unreachable, the revocation is queued and retried; gates 2 and 3 are already closed.
 
 ### Security changes vs the prototype
@@ -159,6 +161,8 @@ catflap forward list
 catflap notify add telegram|ntfy|pushover|command [--name N]   # prompts for tokens
 catflap notify list | remove NAME | test [NAME]
 catflap restart [relay|homelab]         # restarts the service of whatever is set up here (systemd)
+catflap uninstall [relay|homelab|client] [--yes] [--keep-binary]   # shows a plan, asks first
+sudo catflap relay remove HOMELAB       # forget a homelab that's gone without uninstall
 
 catflap enroll INVITE [--alias homelab] [--ssh-key FILE.pub] [--no-ssh-config]
 catflap proxy ALIAS [PORT]              # ssh ProxyCommand: stdio <-> homelab port (default 22)
@@ -178,6 +182,7 @@ catflap version
 - Admission: derpserver only supports a URL hook, so catflap serves it on an in-process loopback listener, **fail closed**.
 - Upstream derper's settings are copied: 30 s read/write timeouts (cleared on hijack), TLS ≥ 1.2, `ModifyTLSConfigToAddMetaCert`, TCP keepalive.
 - Files: `/etc/catflap/relay.json` (settings), `/var/lib/catflap/state.json` (DERP key, agents, allowlist, open invites, join codes; hashes only), `/var/lib/catflap/certs/`.
+- **Backup and restore** (moving the relay, same hostname): `relay backup FILE` writes one JSON file (600) with the config, `state.json` and, in manual cert mode, the certificate. `setup relay --restore FILE` runs the normal setup with that config and state instead of creating a join code; it refuses to replace an existing relay state without `--force`, and keeps the hostname, because the homelab address on every client contains it. Let's Encrypt certificates aren't backed up; the new server gets its own. After any outage, the homelab re-sends its device list and open invites, so a relay restored from a slightly older backup catches up by itself.
 - Limits: 64 KB request bodies, per-IP rate limit on `/v1/enroll`, max 5 submissions per invite, max 50 open invites per agent, agent long poll ≤ 25 s.
 
 ### Homelab (`catflap homelab run`)
@@ -222,8 +227,8 @@ Host homelab
   - Every request carries the caller's build identity (version, path, size, mtime of the binary). An agent from another build answers "restart", stops accepting, lets its open sessions finish and exits; the caller starts a fresh one.
   - The agent is started detached (new session on Unix; no console, own process group and, where allowed, outside the caller's job object on Windows), so it outlives the ssh process that started it. Log: `agent.log` next to the socket.
   - If the agent can't be used, callers fall back to an engine inside their own process (the old behavior). `CATFLAP_NO_AGENT=1` forces that.
-  - Known limit: two homelabs on the **same** relay would still give the agent two engines with the same key.
-- Files: `<user config dir>/catflap/client.json` (600: client key, servers). `<user config dir>` is `~/.config` on Linux, `~/Library/Application Support` on macOS and `%AppData%` on Windows.
+- **One key per enrollment** (since v0.3): the relay allows one connection per node key and replaces the older one, so two homelabs on the same relay, used at once with one key, kicked each other off. Each enrollment now generates its own key, stored with that homelab's entry; entries from before v0.3 keep using the old shared device key (`KeyFor`), so nobody has to re-enroll.
+- Files: `<user config dir>/catflap/client.json` (600: one key and address per homelab). `<user config dir>` is `~/.config` on Linux, `~/Library/Application Support` on macOS and `%AppData%` on Windows.
 
 ## Distribution
 
@@ -251,15 +256,19 @@ Details and the release checklist: [releasing.md](releasing.md).
   - an unknown key is rejected by the relay
   - the client agent: two sessions at once both keep working, a reconnect right after a session is fast, the no-agent fallback works, devices recover after a homelab restart
   - forwards: a port is unreachable until `forward add`, the client `forward` listener reaches it, `forward remove` cuts an open connection and blocks new ones, forwards survive a restart
+  - one client enrolled in two homelabs on the same relay: each enrollment has its own key, sessions to both at once keep working; a client from before v0.3 (one shared key) still works
+  - uninstall and relay remove: `setup --force` replaces its relay record, `relay remove` asks first, client and homelab uninstall remove what they set up (homelab: also from the relay and `authorized_keys`), refuse while the daemon runs
   - notifications, against fake Telegram/ntfy services (`tests/fakeservices.py`): a channel only goes live after its test message, Telegram links only the chat that sent the one-time code, the token is never shown, `/invite` gives a working invite and the message is edited once used, alerts go to the other channels (not echoed to Telegram), a stranger gets nothing and triggers an alert, a tampered enrollment triggers an alert, `/remove` with its confirm button removes the device
 - **Install tests** (`tests/install.sh`, `tests/install.ps1`): the install scripts against a goreleaser snapshot served on localhost: install, upgrade over a running catflap (Windows: locked exe moved aside, cleaned up later), tampered binary and missing checksum refused (existing file untouched), missing release; Windows also checks the PATH entry and its registry type, and restores your PATH afterwards.
 - **Docker platform test** (`tests/docker.sh`, local, needs Docker with arm64 emulation): `install.sh` on Alpine (busybox wget), Debian (wget / no downloader), Ubuntu and Fedora, amd64, arm64 and 32-bit ARM (v6, v7), as root and as a normal user, checking the right binary was picked; then the end-to-end test with the amd64, arm64, ARMv7 (Debian) and ARMv6 (Alpine) release binaries (`CATFLAP_BIN`). Emulation doesn't enforce ARMv6-only instructions; `GOARM=6` does.
+- **systemd test** (`tests/systemd.sh`, Docker with a privileged container running systemd): `setup relay` and `setup homelab` as real services, `restart` of both, a client as a second user, then moving the relay (backup, wipe, `--restore`: homelab and client reconnect by themselves, and a device enrolled after the backup is re-sent by the homelab), then `uninstall` of all three roles: services, files, the relay's system user and the binaries are gone, and the homelab removed itself from the relay.
 - CI (`.github/workflows/ci.yml`): `go vet`, unit tests and the end-to-end test on amd64 and native arm64 runners; a release dry run (goreleaser snapshot of all six targets) with the install tests on Linux, macOS and Windows (PowerShell 5.1 and 7), plus shellcheck.
 
 ## Milestones
 
 1. **Core:** codes + crypto, relay (DERP + API), homelab daemon, client enroll/proxy, local e2e test.
 2. **Setup commands and distribution:** systemd units, `catflap` system user, firewall, linger; install scripts; goreleaser; CI and attested releases. *(done; first published release pending)*
-3. **Docs:** rewrite README + docs for v1.
-4. **v0.2:** notifications (ntfy, Pushover, Telegram, command) and the Telegram invite bot.
-5. **Later:** tap-to-approve enrollment (flow A), macOS homelab (launchd).
+3. **Docs:** user guides: getting started, daily use, troubleshooting, security. *(done)*
+4. **v0.2:** notifications (ntfy, Pushover, Telegram, command) and the Telegram invite bot, `catflap restart`.
+5. **v0.3:** `catflap uninstall`, `relay remove`, relay backup/restore (moving the relay), one key per enrollment.
+6. **Later:** moving the relay to a new hostname, tap-to-approve enrollment (flow A), macOS homelab (launchd).

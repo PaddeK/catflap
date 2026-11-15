@@ -49,6 +49,7 @@ func (a *apiServer) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/agent/result", a.agentOnly(a.handleResult))
 	mux.HandleFunc("POST /v1/agent/sync", a.agentOnly(a.handleSync))
 	mux.HandleFunc("GET /v1/agent/status", a.agentOnly(a.handleStatus))
+	mux.HandleFunc("DELETE /v1/agent", a.agentOnly(a.handleLeave))
 }
 
 // admitHandler answers derpserver's --verify-client-url style requests.
@@ -388,6 +389,23 @@ func (a *apiServer) handleSync(w http.ResponseWriter, r *http.Request, agentID s
 		writeErr(w, http.StatusInternalServerError, "relay storage error")
 		return
 	}
+	writeJSON(w, http.StatusOK, struct{}{})
+}
+
+// handleLeave removes the calling homelab (on uninstall or a fresh setup):
+// its record, its devices at gate 1 and its open invites.
+func (a *apiServer) handleLeave(w http.ResponseWriter, r *http.Request, agentID string) {
+	s := a.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := s.st.Agents[agentID].Name
+	delete(s.st.Agents, agentID)
+	s.gcLocked(time.Now())
+	if err := s.saveLocked(); err != nil {
+		writeErr(w, http.StatusInternalServerError, "relay storage error")
+		return
+	}
+	a.logf("leave: homelab %q (agent %s) removed itself", name, agentID)
 	writeJSON(w, http.StatusOK, struct{}{})
 }
 

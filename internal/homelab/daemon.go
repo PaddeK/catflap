@@ -231,6 +231,14 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 			d.alert(notify.Message{Event: "relay.up", Title: "relay reachable again",
 				Body: fmt.Sprintf("The relay %s is reachable again after %s.", d.cfg.Relay, time.Since(down).Round(time.Minute))}, "")
 		}
+		if !down.IsZero() {
+			// Back after an outage: the relay may have lost recent changes (e.g.
+			// restored from a backup), so send the device list and invites again.
+			d.mu.Lock()
+			d.st.NeedsSync = true
+			d.mu.Unlock()
+			d.registerOpenInvites(ctx)
+		}
 		down, alerted = time.Time{}, false
 		backoff = time.Second
 		for _, s := range ev.Submissions {

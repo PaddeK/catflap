@@ -29,19 +29,33 @@ import (
 
 // State is the client's file: its identity and the homelabs it can reach.
 type State struct {
-	Key     key.NodePrivate    `json:"key"`
+	// Key is the device key of enrollments made before v0.3; newer ones
+	// have their own key per homelab (Server.Key).
+	Key     key.NodePrivate    `json:"key,omitzero"`
 	Servers map[string]*Server `json:"servers"`
 }
 
 // Server is one enrolled homelab, stored under its ssh alias.
 type Server struct {
-	Addr         string    `json:"addr"` // tailcat address (secret: contains the PSK)
-	Relay        string    `json:"relay"`
-	Homelab      string    `json:"homelab"`
-	DeviceName   string    `json:"device_name"`
-	SSHUser      string    `json:"ssh_user"`
-	IdentityFile string    `json:"identity_file,omitempty"`
-	Enrolled     time.Time `json:"enrolled"`
+	Addr string `json:"addr"` // tailcat address (secret: contains the PSK)
+	// Key is this device's key for this homelab. One key per enrollment:
+	// the relay allows one connection per key, so homelabs sharing a relay
+	// need different keys to be used at the same time.
+	Key          key.NodePrivate `json:"key,omitzero"`
+	Relay        string          `json:"relay"`
+	Homelab      string          `json:"homelab"`
+	DeviceName   string          `json:"device_name"`
+	SSHUser      string          `json:"ssh_user"`
+	IdentityFile string          `json:"identity_file,omitempty"`
+	Enrolled     time.Time       `json:"enrolled"`
+}
+
+// KeyFor returns the key to use for s (its own, or the old shared one).
+func (st *State) KeyFor(s *Server) key.NodePrivate {
+	if !s.Key.IsZero() {
+		return s.Key
+	}
+	return st.Key
 }
 
 // StatePath returns the client state file location.
@@ -115,12 +129,7 @@ func Enroll(ctx context.Context, o EnrollOptions) error {
 	if err != nil {
 		return err
 	}
-	if st.Key.IsZero() {
-		st.Key = key.NewNode()
-		if err := fsutil.WriteJSON(path, st, 0o600); err != nil {
-			return err
-		}
-	}
+	devKey := key.NewNode() // this enrollment's own key
 
 	sshKey, identity := "", ""
 	if !o.NoSSHKey {
@@ -132,7 +141,7 @@ func Enroll(ctx context.Context, o EnrollOptions) error {
 	if len(host) > 64 {
 		host = host[:64]
 	}
-	f := codes.EnrollFields{InviteID: code.ID, NodeKey: st.Key.Public().String(), SSHKey: sshKey, Hostname: host, Nonce: codes.RandomNonce()}
+	f := codes.EnrollFields{InviteID: code.ID, NodeKey: devKey.Public().String(), SSHKey: sshKey, Hostname: host, Nonce: codes.RandomNonce()}
 	req := api.EnrollRequest{InviteID: f.InviteID, NodeKey: f.NodeKey, SSHKey: f.SSHKey, Hostname: f.Hostname, Nonce: f.Nonce, MAC: codes.EnrollMAC(keys, f)}
 
 	rc := api.NewClient(code.Relay, "")
@@ -185,7 +194,7 @@ func Enroll(ctx context.Context, o EnrollOptions) error {
 		fmt.Fprintf(out, "Note: replacing the existing entry %q.\n", alias)
 	}
 	st.Servers[alias] = &Server{
-		Addr: reply.Addr, Relay: code.Relay, Homelab: reply.Homelab, DeviceName: reply.Name,
+		Addr: reply.Addr, Key: devKey, Relay: code.Relay, Homelab: reply.Homelab, DeviceName: reply.Name,
 		SSHUser: reply.SSHUser, IdentityFile: identity, Enrolled: time.Now(),
 	}
 	if err := fsutil.WriteJSON(path, st, 0o600); err != nil {
@@ -284,7 +293,7 @@ func newTailcatClient(st *State, alias string) (*tailcat.Client, error) {
 	if os.Getenv("CATFLAP_DEBUG") != "" {
 		tlog = logger.WithPrefix(log.Printf, "tailcat: ")
 	}
-	return &tailcat.Client{Server: tailcat.Addr(srv.Addr), Key: st.Key, Logf: tlog}, nil
+	return &tailcat.Client{Server: tailcat.Addr(srv.Addr), Key: st.KeyFor(srv), Logf: tlog}, nil
 }
 
 // Probe dials a port through the tunnel and returns the first line the

@@ -48,7 +48,7 @@ const (
 )
 
 type agentRequest struct {
-	Op       string `json:"op"` // "dial" or "ping"
+	Op       string `json:"op"` // "dial", "ping" or "stop"
 	Alias    string `json:"alias,omitempty"`
 	Port     uint16 `json:"port,omitempty"`
 	Identity string `json:"identity"` // build identity of the caller
@@ -279,7 +279,7 @@ func RunAgent(ctx context.Context) error {
 	}
 	// Listener closed (idle or retired): let open connections finish,
 	// unless we were asked to stop.
-	for a.active.Load() > 0 && parent.Err() == nil {
+	for a.active.Load() > 0 && parent.Err() == nil && !a.stopping.Load() {
 		time.Sleep(time.Second)
 	}
 	a.mu.Lock()
@@ -289,6 +289,32 @@ func RunAgent(ctx context.Context) error {
 	a.mu.Unlock()
 	log.Printf("agent: exit")
 	return nil
+}
+
+// StopAgent stops this user's running agent (if any) and waits until it is
+// gone, so its files can be deleted. Open sessions through it end.
+func StopAgent() error {
+	sock, err := AgentSocket()
+	if err != nil {
+		return err
+	}
+	c, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		return nil // not running
+	}
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	writeLine(c, agentRequest{Op: "stop", Identity: buildIdentity()})
+	var resp agentResponse
+	readLine(c, &resp) // older agents answer "restart" and retire as well
+	c.Close()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if c, err := net.DialTimeout("unix", sock, 200*time.Millisecond); err != nil {
+			return nil
+		} else {
+			c.Close()
+		}
+	}
+	return errors.New("the client agent did not stop")
 }
 
 // listenAgent listens on sock, replacing a stale socket file but never a
@@ -316,6 +342,7 @@ type agent struct {
 	clients  map[string]*agentClient // by alias
 	lastUsed time.Time
 	retired  bool
+	stopping atomic.Bool // `catflap uninstall`: exit without waiting for open connections
 }
 
 type agentClient struct {
@@ -379,6 +406,14 @@ func (a *agent) serve(ctx context.Context, c net.Conn) {
 		return
 	}
 	c.SetReadDeadline(time.Time{})
+	if req.Op == "stop" { // `catflap uninstall`; the socket is private to this user
+		log.Printf("agent: asked to stop")
+		writeLine(c, agentResponse{OK: true})
+		c.Close()
+		a.stopping.Store(true)
+		a.retire()
+		return
+	}
 	if req.Identity != a.identity {
 		log.Printf("agent: caller is another catflap build, retiring")
 		writeLine(c, agentResponse{Restart: true})
@@ -477,7 +512,7 @@ func (a *agent) client(alias string) (cl *tailcat.Client, fresh bool, err error)
 	defer a.mu.Unlock()
 	srv, ok := st.Servers[alias]
 	cur := a.clients[alias]
-	if cur != nil && (!ok || cur.addr != srv.Addr || !cur.key.Equal(st.Key)) {
+	if cur != nil && (!ok || cur.addr != srv.Addr || !cur.key.Equal(st.KeyFor(srv))) {
 		cur.cl.Close() // re-enrolled or forgotten
 		delete(a.clients, alias)
 		cur = nil
@@ -487,7 +522,7 @@ func (a *agent) client(alias string) (cl *tailcat.Client, fresh bool, err error)
 		if err != nil {
 			return nil, false, err
 		}
-		cur = &agentClient{cl: cl, addr: srv.Addr, key: st.Key}
+		cur = &agentClient{cl: cl, addr: srv.Addr, key: st.KeyFor(srv)}
 		a.clients[alias] = cur
 		fresh = true
 	}

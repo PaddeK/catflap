@@ -6,9 +6,17 @@ catflap builds on [tailcat](https://github.com/tailscale/tailcat), Tailscale's c
 WireGuard tunnel. It embeds tailcat and Tailscale's DERP relay server, adds an allowlist at every
 hop, and replaces "copy keys around by hand" with one-time invite codes.
 
-> **Status: v1 in development.** The core works and passes the local end-to-end test.
-> Release builds and install scripts are ready; the user docs are next ([milestones](docs/design.md#milestones)).
+> **Status: early releases (v0.x).** It works and is in daily use. Every change runs the end-to-end
+> tests on Linux (amd64 and arm64) and the install tests on macOS and Windows. Expect rough edges.
 > Not affiliated with Tailscale.
+
+## Documentation
+
+- **[Getting started](docs/getting-started.md)**: relay, homelab and first device, step by step
+- **[Using catflap](docs/using-catflap.md)**: devices, more ports, phone alerts and the Telegram bot, upgrades, backups, moving the relay
+- **[Troubleshooting](docs/troubleshooting.md)**: logs and common problems
+- **[Security](docs/security.md)**: what protects your homelab, and what to do if something is lost
+- [Design](docs/design.md) and [releasing](docs/releasing.md), for the technical details
 
 ## Install
 
@@ -31,6 +39,8 @@ attestation: `gh attestation verify catflap_linux_amd64 --repo PaddeK/catflap`.
 See [docs/releasing.md](docs/releasing.md) for details.
 
 ## How it works (short)
+
+The full walkthrough is in [Getting started](docs/getting-started.md).
 
 ```
 catflap setup relay --hostname derp.example.com    # on a small VPS (as root)
@@ -74,7 +84,7 @@ catflap notify add ntfy                             # optional second channel fo
 - **Platforms.** Relay: Linux. Homelab: Linux (systemd). Clients: macOS arm64, Linux amd64/arm64/32-bit ARM,
   Windows amd64/arm64. Raspberry Pi works as homelab or client (64-bit OS: arm64; 32-bit OS: ARMv6+ build).
 
-Read [docs/design.md](docs/design.md) for the full design and security model.
+See [Security](docs/security.md) for what this means in practice, and [the design](docs/design.md) for the details.
 
 ## Build and test
 
@@ -107,6 +117,7 @@ install.sh            installer for Linux/macOS
 install.ps1           installer for Windows
 .goreleaser.yaml      release build
 .github/workflows/    CI and release (with build attestations)
+docs/getting-started.md, using-catflap.md, troubleshooting.md, security.md   user guides
 docs/design.md        design and security model
 docs/releasing.md     releases, verification, upgrades
 ```

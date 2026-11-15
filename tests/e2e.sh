@@ -141,6 +141,8 @@ python3 -I - "$T/c1/client.json" "$T/c3/client.json" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))
 c["key"] = "privkey:" + "11" * 32
+for s in c["servers"].values():
+    s["key"] = c["key"]
 json.dump(c, open(sys.argv[2], "w"))
 PY
 OUT=$(printf 'x\n' | timeout 25 env CATFLAP_DIR="$T/c3" "$CF" proxy testlab 22 2>>"$T/proxy.err" | head -1 | tr -d '\r' || true)
@@ -272,6 +274,70 @@ check "alert: device removed via the bot" fake has ntfy "tgdev was removed via t
 check "notify test reaches every channel" $H "$CF" notify test
 $H "$CF" notify remove telegram > /dev/null
 check "notify remove" bash -c "! $H '$CF' notify list | grep -q telegram"
+
+echo "== one client, two homelabs on the same relay"
+J3=$("$CF" relay join-code --config "$T/relay/relay.json" | grep -o 'cfj1-[^ ]*')
+H3="env CATFLAP_DIR=$T/homelab3"
+$H3 "$CF" setup homelab --join "$J3" --name lab3 --no-service --forward "22=127.0.0.1:$SSHD_PORT" > /dev/null 2>&1
+$H3 "$CF" homelab run > "$T/homelab3.log" 2>&1 &
+H3PID=$!
+PIDS+=("$H3PID")
+for _ in $(seq 100); do [ -S "$T/homelab3/control.sock" ] && break; sleep 0.1; done
+mkdir -p "$T/c6"
+client c6 enroll "$($H "$CF" invite multi | grep -o 'cfi1-[^ ]*')" --no-ssh-key > "$T/c6a.log" 2>&1 || true
+client c6 enroll "$($H3 "$CF" invite multi | grep -o 'cfi1-[^ ]*')" --no-ssh-key > "$T/c6b.log" 2>&1 || true
+check "client enrolls in both homelabs" bash -c "grep -q Approved '$T/c6a.log' && grep -q Approved '$T/c6b.log'"
+check "each enrollment has its own key" python3 -I -c 'import json, sys
+c = json.load(open(sys.argv[1]))
+k = [s.get("key") for s in c["servers"].values()]
+sys.exit(0 if len(k) == 2 and all(k) and len(set(k)) == 2 and "key" not in c else 1)' "$T/c6/client.json"
+OUT=$(CATFLAP_DIR="$T/c6" timeout 60 python3 -I tests/concurrent.py "$CF" testlab lab3 2>&1)
+check "sessions to both homelabs at once keep working ($OUT)" test "$OUT" = ok
+# A client enrolled before v0.3 has one shared key at the top of client.json.
+mkdir -p "$T/c7"
+python3 -I - "$T/c6/client.json" "$T/c7/client.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+s = c["servers"]["testlab"]
+legacy = {"key": s.pop("key"), "servers": {"testlab": s}}
+json.dump(legacy, open(sys.argv[2], "w"))
+PY
+OUT=$(printf 'old\n' | timeout 30 env CATFLAP_DIR="$T/c7" "$CF" proxy testlab 22 2>/dev/null | head -2 | tr -d '\r' | tr '\n' '|')
+check "a client from before v0.3 (one shared key) still works" test "$OUT" = "SSH-2.0-catflap-e2e-fake|old|"
+kill "$H3PID" 2>/dev/null || true; wait "$H3PID" 2>/dev/null || true
+
+echo "== relay remove, setup --force, uninstall"
+RC="--config $T/relay/relay.json"
+lab2() { "$CF" relay status $RC | grep -c 'homelab "lab2"' || true; }
+J1=$("$CF" relay join-code $RC | grep -o 'cfj1-[^ ]*')
+env CATFLAP_DIR="$T/homelab2" "$CF" setup homelab --join "$J1" --name lab2 --no-service > /dev/null 2>&1
+check "a second homelab registers" test "$(lab2)" = 1
+J2=$("$CF" relay join-code $RC | grep -o 'cfj1-[^ ]*')
+env CATFLAP_DIR="$T/homelab2" "$CF" setup homelab --join "$J2" --name lab2 --no-service --force > /dev/null 2>&1
+check "setup --force replaces its relay record instead of adding one" test "$(lab2)" = 1
+check "relay remove asks first (no terminal: nothing happens)" bash -c "! '$CF' relay remove lab2 $RC < /dev/null > /dev/null 2>&1 && [ \$('$CF' relay status $RC | grep -c 'homelab \"lab2\"') = 1 ]"
+"$CF" relay remove lab2 $RC --yes > "$T/rrm.log" 2>&1
+check "relay remove forgets the homelab" bash -c "grep -q 'removed homelab \"lab2\"' '$T/rrm.log' && [ \$('$CF' relay status $RC | grep -c 'homelab \"lab2\"') = 0 ]"
+check "relay remove: unknown name" bash -c "'$CF' relay remove nosuch $RC --yes 2>&1 | grep -q 'no homelab \"nosuch\"'"
+
+# Client: c2 is enrolled in testlab; use it once so its agent runs.
+printf 'x\n' | timeout 30 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 22 2>/dev/null | head -1 > /dev/null || true
+check "uninstall without --yes and terminal changes nothing" bash -c "! env CATFLAP_DIR='$T/c2' CATFLAP_SSH_CONFIG='$T/c2/ssh_config' '$CF' uninstall < /dev/null > /dev/null 2>&1; test -f '$T/c2/client.json'"
+env CATFLAP_DIR="$T/c2" CATFLAP_SSH_CONFIG="$T/c2/ssh_config" "$CF" uninstall --yes > "$T/cun.log" 2>&1
+check "client uninstall: ssh config block removed" bash -c "! grep -q 'Host testlab' '$T/c2/ssh_config'"
+check "client uninstall: keys and agent gone" bash -c "[ ! -e '$T/c2/client.json' ] && [ ! -e '$T/c2/agent.sock' ]"
+check "client uninstall: tells how to remove the device on the homelab" grep -q 'catflap remove phone' "$T/cun.log"
+check "client uninstall keeps a binary outside the install locations" bash -c "grep -q 'kept $CF' '$T/cun.log' && [ -x '$CF' ]"
+
+# Homelab: refuses while the daemon runs, then removes everything.
+check "homelab uninstall refuses while the daemon runs" bash -c "$H '$CF' uninstall homelab --yes 2>&1 | grep -q 'still running'"
+pkill -f "$T/catflap homelab run" || true
+for _ in $(seq 50); do [ -S "$T/homelab/control.sock" ] || break; sleep 0.1; done
+$H "$CF" uninstall homelab --yes > "$T/hun.log" 2>&1
+check "homelab uninstall removes it from the relay" bash -c "grep -q 'removed from relay' '$T/hun.log' && ! '$CF' relay status $RC | grep -q 'homelab \"testlab\"'"
+check "homelab uninstall removes catflap's SSH keys" bash -c "! grep -q 'catflap:' '$T/homelab/authorized_keys'"
+check "homelab uninstall deletes config, state and channels" bash -c "[ ! -e '$T/homelab/homelab.json' ] && [ ! -e '$T/homelab/homelab-state.json' ] && [ ! -e '$T/homelab/notify.json' ]"
+check "nothing left to uninstall" bash -c "$H '$CF' uninstall homelab --yes 2>&1 | grep -q 'no homelab set up'"
 
 echo
 echo "passed $pass, failed $fail"

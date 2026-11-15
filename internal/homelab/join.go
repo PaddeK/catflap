@@ -5,6 +5,7 @@ import (
 	"encoding/base32"
 	"errors"
 	"fmt"
+	"log"
 	"os/user"
 	"strings"
 
@@ -64,6 +65,17 @@ func Join(ctx context.Context, p Paths, o JoinOptions) (Config, error) {
 		return Config{}, fmt.Errorf("contacting relay %s: %w", code.Relay, err)
 	}
 	st.AgentID, st.AgentToken, st.STUNPort = resp.AgentID, resp.Token, resp.STUNPort
+
+	// --force: the new registration worked, so remove the old one from its
+	// relay instead of leaving a stale record there.
+	if old.AgentToken != "" {
+		var oldCfg Config
+		if fsutil.ReadJSON(p.Config, &oldCfg) == nil && oldCfg.Relay != "" {
+			if err := Deregister(ctx, oldCfg.Relay, old.AgentToken); err != nil {
+				log.Printf("note: could not remove the old homelab record from %s (%v); remove it there with: sudo catflap relay remove", oldCfg.Relay, err)
+			}
+		}
+	}
 
 	cfg := Config{Relay: code.Relay, Name: o.Name, Forwards: o.Forwards}
 	if len(cfg.Forwards) == 0 {

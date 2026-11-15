@@ -97,3 +97,6 @@ func (c Config) PublicAddr() string {
 
 func (c Config) statePath() string { return filepath.Join(c.StateDir, "state.json") }
 func (c Config) certDir() string   { return filepath.Join(c.StateDir, "certs") }
+
+// AdminSocketPath is the local admin API's unix socket.
+func (c Config) AdminSocketPath() string { return c.adminSocket() }
