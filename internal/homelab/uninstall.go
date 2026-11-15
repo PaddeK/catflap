@@ -87,9 +87,10 @@ type UninstallResult struct {
 }
 
 // Uninstall removes the homelab's data: it de-registers from the relay,
-// removes the SSH keys catflap added, and deletes config, state and
-// notification channels. The service must be stopped before. keysDone
-// skips the keys (the daemon removed them already, see POST /uninstall/keys).
+// removes the SSH keys catflap added, and deletes config, state,
+// notification channels and the service log. The service must be stopped
+// before. keysDone skips the keys (the daemon removed them already, see
+// POST /uninstall/keys).
 func Uninstall(ctx context.Context, p Paths, keysDone bool) (UninstallResult, error) {
 	var res UninstallResult
 	var cfg Config
@@ -104,7 +105,7 @@ func Uninstall(ctx context.Context, p Paths, keysDone bool) (UninstallResult, er
 	if !keysDone {
 		res.KeysRemoved, res.KeysErr = removeDeviceKeys(cfg, st.Devices)
 	}
-	for _, f := range []string{p.State, p.Notify, p.Socket, p.Config} {
+	for _, f := range []string{p.State, p.Notify, p.Socket, p.Config, p.Log, p.Log + ".1"} {
 		if err := os.Remove(f); err == nil {
 			res.FilesRemoved = append(res.FilesRemoved, f)
 		} else if !errors.Is(err, fs.ErrNotExist) {

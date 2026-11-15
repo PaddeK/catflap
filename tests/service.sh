@@ -189,6 +189,7 @@ check "uninstall: done" grep -q '^done' "$T/uninstall.log"
 check "the service is gone" not service_loaded
 check "the homelab stopped" bash -c "! '$CF' status | grep -q 'homelab:'"
 check "catflap's SSH key removed" bash -c "! grep -q 'catflap:dev1' '$KEYS'"
+check "the service log deleted" test ! -e "$HL_LOG"
 if [ $OS = mac ]; then
 	check "LaunchAgent plist removed" test ! -f "$HOME/Library/LaunchAgents/catflap.homelab.plist"
 fi
