@@ -74,12 +74,17 @@
         $dst = Join-Path $dir 'catflap.exe'
         # A running catflap.exe (e.g. the client agent) can't be deleted, but it can be
         # renamed: move it aside then. Leftovers from earlier upgrades go when unused.
+        # A file that isn't running may still be held for a moment (virus scanner), so
+        # deleting it is retried briefly before falling back to the rename.
         Get-ChildItem -Path $dir -Filter 'catflap.exe.old-*' -ErrorAction SilentlyContinue |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
         if (Test-Path -LiteralPath $dst) {
-            try {
-                Remove-Item -LiteralPath $dst -Force
-            } catch {
+            $running = @(Get-Process -Name catflap -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $dst }).Count -gt 0
+            $tries = if ($running) { 0 } else { 10 }
+            for ($i = 0; $i -lt $tries -and (Test-Path -LiteralPath $dst); $i++) {
+                try { Remove-Item -LiteralPath $dst -Force } catch { Start-Sleep -Milliseconds 200 }
+            }
+            if (Test-Path -LiteralPath $dst) {
                 Move-Item -LiteralPath $dst -Destination "$dst.old-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
             }
         }
