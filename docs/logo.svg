@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>catflap</title>
+  <path d="M20 52 L26 14 Q27 9 31 12 L54 34 H74 L97 12 Q101 9 102 14 L108 52 V100 Q108 116 92 116 H36 Q20 116 20 100 Z" fill="#475569"/>
+  <rect x="34" y="48" width="60" height="56" rx="12" fill="#0b1120"/>
+  <ellipse cx="54" cy="96" rx="4.8" ry="4" fill="#fbbf24"/>
+  <rect x="53.3" y="92.8" width="1.4" height="6.4" rx=".7" fill="#0b1120"/>
+  <ellipse cx="74" cy="96" rx="4.8" ry="4" fill="#fbbf24"/>
+  <rect x="73.3" y="92.8" width="1.4" height="6.4" rx=".7" fill="#0b1120"/>
+  <path d="M34 60 Q34 48 46 48 H82 Q94 48 94 60 V83 Q94 87 90 87 H38 Q34 87 34 83 Z" fill="#5f9a96"/>
+  <path d="M41 55 H87" stroke="#43736f" stroke-width="3" stroke-linecap="round"/>
+</svg>

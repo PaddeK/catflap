@@ -1,6 +1,10 @@
-# catflap
+<p align="center">
+  <img src="docs/logo.svg" alt="" width="128" height="128">
+</p>
 
-Reach your homelab from anywhere through **your own relay**, with one binary.
+<h1 align="center">catflap</h1>
+
+<p align="center">Reach your homelab from anywhere through <strong>your own relay</strong>, with one binary.</p>
 
 You run a small relay on a cheap VPS. Your homelab connects out to it, so it needs no open
 ports and no router changes. Your laptop and other devices connect through the relay and reach
