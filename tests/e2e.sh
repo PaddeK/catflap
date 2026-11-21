@@ -116,6 +116,11 @@ OUT=$(printf 'quick\n' | timeout 30 env CATFLAP_DIR="$T/c1" "$CF" proxy testlab 
 DT=$(awk -v s="$S" -v e="$(date +%s.%N)" 'BEGIN { printf "%.2f", e - s }')
 fast() { [ "$OUT" = 'SSH-2.0-catflap-e2e-fake|quick|' ] && awk -v d="$DT" 'BEGIN { exit !(d < 3) }'; }
 check "reconnect right after sessions is fast (${DT}s)" fast
+# The fallback runs its own engine with the device's key; while the agent
+# holds the same key, the two get in each other's way (the relay keeps one
+# connection per key), so stop the agent first.
+pkill -f "$T/catflap agent" 2>/dev/null || true
+sleep 1
 check "CATFLAP_NO_AGENT fallback works" bash -c "printf 'x\n' | CATFLAP_NO_AGENT=1 CATFLAP_DIR='$T/c1' timeout 30 '$CF' proxy testlab 22 2>/dev/null | head -1 | grep -q SSH-"
 
 echo "== activity and ping"

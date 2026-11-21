@@ -23,7 +23,10 @@ the homelab is running. Then check the logs.
 internals.
 - Client: `CATFLAP_NO_AGENT=1 CATFLAP_DEBUG=1 ssh homelab` runs this one connection without the
   catflap agent and prints the details in your terminal. (Windows PowerShell:
-  `$env:CATFLAP_NO_AGENT=1; $env:CATFLAP_DEBUG=1; ssh homelab`.)
+  `$env:CATFLAP_NO_AGENT=1; $env:CATFLAP_DEBUG=1; ssh homelab`.) Stop the agent first
+  (it holds the same device key, and two connections with one key get in each other's way):
+  close your other sessions to that homelab and end it, `pkill -f "catflap agent"` on Linux and
+  macOS, or wait the 10 minutes after which it exits by itself.
 - Homelab, Linux: `systemctl --user edit catflap`, add the two lines below, then
   `catflap restart`.
   ```
