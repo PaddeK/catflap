@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -28,6 +29,7 @@ import (
 	"github.com/PaddeK/catflap/internal/homelab"
 	"github.com/PaddeK/catflap/internal/relay"
 	"github.com/PaddeK/catflap/internal/setup"
+	"github.com/PaddeK/catflap/internal/update"
 )
 
 // Set by the release build (-ldflags "-X main.version=...").
@@ -63,6 +65,7 @@ Homelab administration:
 Client:
   catflap forward <alias> [local:]<port>   open localhost:<port> to a forwarded homelab port
   catflap proxy <alias> [port]         ssh ProxyCommand (written to ~/.ssh/config by enroll)
+  catflap ping <alias> [--count 4]     check the tunnel: latency, direct or through the relay
   catflap forget <alias>               delete a homelab entry from this client
 
 Relay administration (as root):
@@ -75,7 +78,8 @@ Other:
   catflap status                       show what is set up on this machine
   catflap restart [relay|homelab]      restart the service, e.g. after an upgrade
   catflap uninstall [relay|homelab|client]   remove catflap from this machine (asks first)
-  catflap version
+  catflap version                      show the version and check for a newer release
+  catflap completion bash|zsh|fish|powershell   tab completion (see docs/using-catflap.md)
   catflap <command> -h                 show the options of a command
 
 Daemons (started by the service manager):
@@ -113,7 +117,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Print(usage)
 		return nil
 	case "version", "--version":
-		return cmdVersion()
+		return cmdVersion(ctx, os.Stdout)
 	case "setup":
 		if len(args) == 0 {
 			return errors.New("usage: catflap setup relay|homelab ...")
@@ -174,12 +178,18 @@ func run(ctx context.Context, args []string) error {
 		return cmdDecide(ctx, cmd, args)
 	case "forget":
 		return cmdForget(args)
+	case "ping":
+		return cmdPing(ctx, args)
 	case "status":
 		return cmdStatus(ctx)
 	case "restart":
 		return cmdRestart(ctx, args)
 	case "uninstall":
 		return cmdUninstall(ctx, args)
+	case "completion":
+		return cmdCompletion(args)
+	case "__complete":
+		return cmdComplete(ctx, args)
 	}
 	return fmt.Errorf("unknown command %q (see `catflap help`)", cmd)
 }
@@ -200,8 +210,12 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
+// flagOutput receives flag errors and -h output (tests silence it).
+var flagOutput io.Writer = os.Stderr
+
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet("catflap "+name, flag.ContinueOnError)
+	fs.SetOutput(flagOutput)
 	return fs
 }
 
@@ -636,7 +650,7 @@ func cmdList(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var devs []homelab.Device
+	var devs []homelab.DeviceInfo
 	if err := c.Do(ctx, "GET", "/devices", nil, &devs); err != nil {
 		return ctlErr(err)
 	}
@@ -644,9 +658,14 @@ func cmdList(ctx context.Context) error {
 		fmt.Println("no devices yet; add one with: catflap invite <name>")
 		return nil
 	}
+	now, untracked := time.Now(), false
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tHOSTNAME\tADDED\tSSH KEY\tNODE KEY")
+	fmt.Fprintln(tw, "NAME\tHOSTNAME\tLAST SEEN\tENROLLED\tSSH KEY\tNODE KEY")
 	for _, d := range devs {
+		host := d.Hostname
+		if host == "" {
+			host = "-"
+		}
 		ssh := "-"
 		if d.SSHKey != "" {
 			ssh = strings.Fields(d.SSHKey)[0]
@@ -655,9 +674,16 @@ func cmdList(ctx context.Context) error {
 		if len(nk) > 20 {
 			nk = nk[:20] + "…"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", d.Name, d.Hostname, d.Added.Local().Format("2006-01-02"), ssh, nk)
+		untracked = untracked || d.TrackedSince.IsZero()
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.Name, host, d.LastSeenText(now), d.Added.Local().Format("2006-01-02"), ssh, nk)
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if untracked {
+		fmt.Println("\nThe running homelab is an older version: restart it (catflap restart) to see when devices were last seen.")
+	}
+	return nil
 }
 
 func cmdRemove(ctx context.Context, args []string) error {
@@ -842,6 +868,85 @@ func cmdForget(args []string) error {
 	return nil
 }
 
+// cmdPing pings the homelab through the tunnel, like ping(8).
+func cmdPing(ctx context.Context, args []string) error {
+	fs := newFlags("ping")
+	count := fs.Int("count", 4, "how many pings (0: until Ctrl-C)")
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 || *count < 0 {
+		return errors.New("usage: catflap ping <alias> [--count 4]")
+	}
+	alias := pos[0]
+	st, _, err := client.Load()
+	if err != nil {
+		return err
+	}
+	if _, ok := st.Servers[alias]; !ok {
+		if len(st.Servers) == 0 {
+			return errors.New("this device is not enrolled anywhere; run `catflap enroll <invite>`")
+		}
+		return fmt.Errorf("unknown homelab %q (known: %s)", alias, strings.Join(st.Aliases(), ", "))
+	}
+	var lat []time.Duration
+	sent, direct := 0, false
+	for ; *count == 0 || sent < *count; sent++ {
+		if sent > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+			}
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		r, err := client.Ping(ctx, alias)
+		if ctx.Err() != nil {
+			break
+		}
+		if err != nil {
+			fmt.Printf("no reply from %s: %v\n", alias, err)
+			continue
+		}
+		lat = append(lat, r.Latency)
+		direct = r.Direct
+		path := "through the relay"
+		if r.Direct {
+			path = "direct"
+			if r.Endpoint != "" {
+				path += " to " + r.Endpoint
+			}
+		}
+		fmt.Printf("reply from %s: %s, %s\n", alias, fmtLatency(r.Latency), path)
+	}
+	if sent == 0 {
+		return nil
+	}
+	fmt.Printf("\n%d of %d pings answered", len(lat), sent)
+	if len(lat) == 0 {
+		fmt.Println()
+		return fmt.Errorf("no reply from %s: is the homelab running and online? (catflap status there)", alias)
+	}
+	lo, hi, sum := lat[0], lat[0], time.Duration(0)
+	for _, l := range lat {
+		lo, hi, sum = min(lo, l), max(hi, l), sum+l
+	}
+	fmt.Printf(", min/avg/max %s/%s/%s\n", fmtLatency(lo), fmtLatency(sum/time.Duration(len(lat))), fmtLatency(hi))
+	if !direct {
+		fmt.Println("The connection goes through the relay. It often turns direct after a few seconds; if it never does, UDP is probably blocked (see docs/troubleshooting.md).")
+	}
+	return nil
+}
+
+func fmtLatency(d time.Duration) string {
+	if d < 10*time.Millisecond {
+		return fmt.Sprintf("%.1f ms", float64(d)/float64(time.Millisecond))
+	}
+	return fmt.Sprintf("%d ms", d.Round(time.Millisecond)/time.Millisecond)
+}
+
 // ---- status / version ----
 
 func cmdStatus(ctx context.Context) error {
@@ -869,7 +974,10 @@ func cmdStatus(ctx context.Context) error {
 				if s.NeedsSync {
 					sync = ", relay sync pending"
 				}
-				fmt.Printf("homelab: %q via %s - running catflap %s, %d device(s), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, ver, s.Devices, s.Invites, strings.Join(s.Forwards, ", "), sync)
+				fmt.Printf("homelab: %q via %s - running catflap %s, %d device(s) (%d connected), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, ver, s.Devices, s.Connected, s.Invites, strings.Join(s.Forwards, ", "), sync)
+				if s.Update != "" {
+					fmt.Printf("         update available: catflap %s (how to upgrade: %s)\n", s.Update, update.UpgradeDocURL)
+				}
 			}
 		}
 	}
@@ -1077,8 +1185,8 @@ func cmdRestart(ctx context.Context, args []string) error {
 	return fmt.Errorf("unknown role %q (want relay or homelab)", role)
 }
 
-func cmdVersion() error {
-	fmt.Printf("catflap %s\n", version)
+func cmdVersion(ctx context.Context, w io.Writer) error {
+	fmt.Fprintf(w, "catflap %s\n", version)
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		var rev, modified string
 		for _, s := range bi.Settings {
@@ -1092,14 +1200,32 @@ func cmdVersion() error {
 			}
 		}
 		if rev != "" {
-			fmt.Printf("  commit %s%s\n", rev, modified)
+			fmt.Fprintf(w, "  commit %s%s\n", rev, modified)
 		}
 		for _, d := range bi.Deps {
 			if d.Path == "github.com/tailscale/tailcat" || d.Path == "tailscale.com" {
-				fmt.Printf("  %s %s\n", d.Path, d.Version)
+				fmt.Fprintf(w, "  %s %s\n", d.Path, d.Version)
 			}
 		}
-		fmt.Printf("  %s\n", bi.GoVersion)
+		fmt.Fprintf(w, "  %s\n", bi.GoVersion)
 	}
+	checkLatest(ctx, w)
 	return nil
+}
+
+// checkLatest asks GitHub whether a newer release exists. Only release
+// builds check; CATFLAP_NO_UPDATE_CHECK=1 turns it off.
+func checkLatest(ctx context.Context, w io.Writer) {
+	if !update.IsRelease(version) || os.Getenv("CATFLAP_NO_UPDATE_CHECK") != "" {
+		return
+	}
+	rel, err := update.Latest(ctx, 5*time.Second)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "\nCould not check for a newer version: %v\n", err)
+	case update.Newer(rel.Version, version):
+		fmt.Fprintf(w, "\nUpdate available: catflap %s (%s)\nHow to upgrade: %s\n", rel.Version, rel.URL, update.UpgradeDocURL)
+	default:
+		fmt.Fprintln(w, "\nThis is the latest release.")
+	}
 }

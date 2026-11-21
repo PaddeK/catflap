@@ -23,7 +23,10 @@ the homelab is running. Then check the logs.
 internals.
 - Client: `CATFLAP_NO_AGENT=1 CATFLAP_DEBUG=1 ssh homelab` runs this one connection without the
   catflap agent and prints the details in your terminal. (Windows PowerShell:
-  `$env:CATFLAP_NO_AGENT=1; $env:CATFLAP_DEBUG=1; ssh homelab`.)
+  `$env:CATFLAP_NO_AGENT=1; $env:CATFLAP_DEBUG=1; ssh homelab`.) Stop the agent first
+  (it holds the same device key, and two connections with one key get in each other's way):
+  close your other sessions to that homelab and end it, `pkill -f "catflap agent"` on Linux and
+  macOS, or wait the 10 minutes after which it exits by itself.
 - Homelab, Linux: `systemctl --user edit catflap`, add the two lines below, then
   `catflap restart`.
   ```
@@ -189,8 +192,10 @@ Normal: the first connection starts the tunnel (a second or two, more if no dire
 exists). Following connections reuse it through the catflap agent.
 
 ### Everything goes through the relay, never direct
-Direct connections need UDP. If the relay's STUN port (3478/udp) is closed, or the network blocks
-UDP, catflap uses the relay for everything. It still works, just with more latency.
+`catflap ping homelab` on the client shows the path of each ping. Direct connections need UDP.
+If the relay's STUN port (3478/udp) is closed, or the network blocks UDP, catflap uses the relay
+for everything. It still works, just with more latency. (`catflap list` on the homelab shows the
+path of each connected device, too.)
 
 ### An open session hangs after the homelab restarted or lost its network
 New connections work again within seconds. A session that was open may hang until ssh notices
@@ -229,6 +234,15 @@ of the box.
 
 ### The homelab still runs the old version after an upgrade
 Run `catflap restart` on it. `catflap status` shows the running version.
+
+### `catflap list` shows "?" under LAST SEEN
+The running homelab is from before v0.6, which didn't record it. `catflap restart` starts the
+new version. Devices then show "not since" the day of the upgrade until they connect again.
+
+### No alert about a new version
+The homelab checks once a day, starting 2 minutes after it started. It needs to reach
+`api.github.com`; errors show up in its log as `update check:` lines. Check that
+`check_updates` isn't `false` in the [settings file](using-catflap.md#homelab-settings-file).
 
 ### The relay still runs the old version after an upgrade
 The install script ran without root and put a second copy in your home directory. Run it again

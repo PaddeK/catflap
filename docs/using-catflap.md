@@ -9,6 +9,7 @@ words are explained [at the end of Getting started](getting-started.md#words-use
 - [Alerts on your phone and the Telegram bot](#alerts-on-your-phone-and-the-telegram-bot)
 - [Approve a new device from your phone (no invite)](#approve-a-new-device-from-your-phone-no-invite)
 - [Several homelabs](#several-homelabs)
+- [Tab completion](#tab-completion)
 - [Homelab settings file](#homelab-settings-file)
 - [Upgrading](#upgrading)
 - [What to back up](#what-to-back-up)
@@ -24,10 +25,20 @@ words are explained [at the end of Getting started](getting-started.md#words-use
 | show open invites (*homelab*) | `catflap invites` |
 | revoke an open invite (*homelab*) | `catflap invites --revoke NAME` |
 | enroll (*client*) | `catflap enroll cfi1-…` |
-| list devices (*homelab*) | `catflap list` |
+| list devices, with when each was last seen (*homelab*) | `catflap list` |
 | remove a device (*homelab*) | `catflap remove NAME` |
+| check the connection to the homelab (*client*) | `catflap ping ALIAS` |
 | forget a homelab (*client*) | `catflap forget ALIAS` (the alias you `ssh` to, by default the homelab's name) |
 | what's set up here (*any*) | `catflap status` |
+
+**Is a device in use?** `catflap list` shows when each device was last seen, and for a device
+connected right now whether it connects directly or through the relay (`/list` in the Telegram
+bot shows the same). A device you haven't seen in months is a good candidate for `catflap remove`.
+
+**How good is the connection?** `catflap ping ALIAS` on a client pings the homelab through the
+tunnel and shows the latency and whether the path is direct. It often starts through the relay
+and turns direct after a few seconds; if it never does, see
+[Troubleshooting](troubleshooting.md#everything-goes-through-the-relay-never-direct).
 
 **Removing a device takes effect immediately:** it's disconnected, the SSH key catflap added for
 it is removed from `authorized_keys`, and the relay stops admitting it. No restarts. If that key
@@ -89,7 +100,8 @@ The homelab can tell you whenever something security-relevant happens:
 - a device was removed, an invite was created;
 - **an enrollment failed** (a tampered, expired or reused invite: someone trying something);
 - the relay has been unreachable for 10 minutes, and when it's back;
-- someone else wrote to your Telegram bot.
+- someone else wrote to your Telegram bot;
+- a new catflap version is out (see [Upgrading](#upgrading)).
 
 Add one or more channels on the homelab. catflap asks for tokens in a hidden prompt (never pass
 them on the command line) and only adds a channel after its test message got through.
@@ -127,7 +139,7 @@ your chat (and only yours) to the homelab. Answer "yes" to run the bot. Then, in
 | `/list` | enrolled devices |
 | `/remove NAME` | remove a device (asks you to confirm) |
 | `/requests on [30m]` / `off` | let new devices ask to join, see [below](#approve-a-new-device-from-your-phone-no-invite) |
-| `/status` | homelab status |
+| `/status` | homelab status: devices connected now, update available |
 
 So with only your phone at hand you can let a new laptop in, or lock out a stolen one.
 
@@ -176,6 +188,21 @@ One client can reach several homelabs; each enrollment adds an entry named after
 for each with `sudo catflap relay join-code` on the relay. Sessions to several homelabs work at
 the same time.
 
+## Tab completion
+
+catflap can complete commands, options, device names and aliases when you press Tab. Load it in
+your shell's startup file:
+
+| Shell | Add this |
+|---|---|
+| bash (`~/.bashrc`) | `source <(catflap completion bash)` |
+| zsh (`~/.zshrc`, after `compinit`) | `source <(catflap completion zsh)` |
+| fish | run once: `catflap completion fish > ~/.config/fish/completions/catflap.fish` |
+| PowerShell (`notepad $PROFILE`) | `catflap completion powershell \| Out-String \| Invoke-Expression` |
+
+Device names, channel names and ports come from the running homelab, aliases from the client, so
+`catflap remove <Tab>` on the homelab and `catflap ping <Tab>` on a client offer the right names.
+
 ## Homelab settings file
 
 Most settings are changed with commands (`catflap forward`, `catflap notify`). A few only live in
@@ -187,11 +214,18 @@ the homelab's settings file: `~/.config/catflap/homelab.json` on Linux and macOS
 | `ssh_user` | your user name | the user devices log in as (written into their ssh config when they enroll) |
 | `authorized_keys` | `~/.ssh/authorized_keys` (Windows admin accounts: `C:\ProgramData\ssh\administrators_authorized_keys`) | the file catflap adds device keys to; `"off"` stops catflap from managing SSH keys |
 | `allow_ssh_keys_from_anywhere` | `false` | `true` lets device keys log in over your LAN too, not only through catflap (affects keys added from then on) |
+| `check_updates` | `true` | once a day, ask GitHub for the latest catflap release and send an alert when there's a newer one; `false` turns it off |
 
 Leave `relay` and `name` alone: they're set by `setup homelab` and `homelab move`, and devices
 store them when they enroll.
 
 ## Upgrading
+
+**You hear about new versions:** once a day the homelab asks GitHub for the latest release. When
+there's a newer one, it sends an alert on your channels (once per version), and `catflap status`
+and `/status` in the Telegram bot show it. Turn it off with `check_updates` in the
+[settings file](#homelab-settings-file). On any machine, `catflap version` checks for a newer
+release when you run it (set `CATFLAP_NO_UPDATE_CHECK=1` to skip that).
 
 Run the install command again on each machine. It verifies the download and replaces catflap in
 place; running catflap processes keep the old version until they restart.

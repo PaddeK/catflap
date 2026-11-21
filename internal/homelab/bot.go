@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PaddeK/catflap/internal/api"
 	"github.com/PaddeK/catflap/internal/codes"
 	"github.com/PaddeK/catflap/internal/notify"
 )
@@ -266,9 +267,7 @@ func (b *bot) listInvites(ctx context.Context) {
 }
 
 func (b *bot) listDevices(ctx context.Context) {
-	b.d.mu.Lock()
-	devs := slices.Clone(b.d.st.Devices)
-	b.d.mu.Unlock()
+	devs := b.d.deviceInfos()
 	if len(devs) == 0 {
 		b.send(ctx, "No devices yet. Add one with /invite &lt;name&gt;.", nil)
 		return
@@ -279,14 +278,19 @@ func (b *bot) listDevices(ctx context.Context) {
 		if dev.Hostname != "" {
 			host = ", hostname " + esc(dev.Hostname)
 		}
-		lines = append(lines, fmt.Sprintf("• <b>%s</b>%s, since %s", esc(dev.Name), host, dev.Added.Local().Format("2006-01-02")))
+		seen := "last seen " + dev.LastSeenText(time.Now())
+		if dev.Active {
+			seen = "connected " + dev.LastSeenText(time.Now())
+		}
+		lines = append(lines, fmt.Sprintf("• <b>%s</b>%s, %s, enrolled %s", esc(dev.Name), host, seen, dev.Added.Local().Format("2006-01-02")))
 	}
 	b.send(ctx, strings.Join(lines, "\n"), nil)
 }
 
 func (b *bot) status(ctx context.Context) {
+	connected := len(b.d.refreshActivity())
 	b.d.mu.Lock()
-	devs, invs, sync := len(b.d.st.Devices), 0, b.d.st.NeedsSync
+	devs, invs, sync, latest := len(b.d.st.Devices), 0, b.d.st.NeedsSync, b.d.latest
 	for _, inv := range b.d.st.Invites {
 		if inv.Used == nil {
 			invs++
@@ -301,8 +305,12 @@ func (b *bot) status(ctx context.Context) {
 	if sync {
 		relay = "sync pending (relay unreachable?)"
 	}
-	b.send(ctx, fmt.Sprintf("Homelab <b>%s</b> via %s\n%d device(s), %d open invite(s)\nForwarding: %s\nRelay: %s",
-		esc(b.d.cfg.Name), esc(b.d.cfg.Relay), devs, invs, esc(strings.Join(fwd, ", ")), relay), nil)
+	update := ""
+	if latest != "" {
+		update = fmt.Sprintf("\nUpdate available: catflap %s (running %s)", esc(latest), esc(api.Version))
+	}
+	b.send(ctx, fmt.Sprintf("Homelab <b>%s</b> via %s\n%d device(s), %d connected now, %d open invite(s)\nForwarding: %s\nRelay: %s%s",
+		esc(b.d.cfg.Name), esc(b.d.cfg.Relay), devs, connected, invs, esc(strings.Join(fwd, ", ")), relay, update), nil)
 }
 
 func (b *bot) askRemove(ctx context.Context, name string) {

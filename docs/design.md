@@ -347,8 +347,19 @@ from the relay's side, for homelabs that are gone.
   writer of its state.
 - Notifications and the Telegram bot run inside the daemon (see
   [above](#notifications-and-the-telegram-invite-bot)).
+- Device activity for `catflap list`: the tailcat server's status has, per device key, the last
+  WireGuard handshake, the last packet sent, whether the device is active (traffic in the last
+  45 s) and whether the current path is a direct UDP address. The tunnel knows this only since
+  the daemon started, so the last-seen time is also stored with each device (saved at most every
+  10 minutes, and at shutdown).
+- Update check (`check_updates`, default on): 2 minutes after the start and then daily, `GET
+  https://api.github.com/repos/PaddeK/catflap/releases/latest`. A newer release (plain
+  `X.Y.Z` versions only; dev builds never check) gives one alert per version and shows in
+  `status`. Nothing but the request itself (IP address, `User-Agent: catflap/VERSION`) reaches
+  GitHub. `catflap version` makes the same request once when it's run, on any machine
+  (`CATFLAP_NO_UPDATE_CHECK=1` skips it); `status` on relays and clients never does.
 - Files: `~/.config/catflap/homelab.json` (settings: relay, name, forwards, ssh user,
-  authorized_keys file, LAN restriction; see the
+  authorized_keys file, LAN restriction, update check; see the
   [user guide](using-catflap.md#homelab-settings-file)),
   `~/.local/state/catflap/homelab-state.json` (600: server key, PSK, homelab token, devices,
   invites), `~/.local/state/catflap/notify.json` (600: notification channels and their tokens).
@@ -441,6 +452,9 @@ Host homelab
     started it. Log: `agent.log` next to the socket.
   - If the agent can't be used, callers fall back to an engine inside their own process.
     `CATFLAP_NO_AGENT=1` forces that.
+  - `catflap ping` asks the agent to ping the homelab with tailcat's disco ping, so it measures
+    the tunnel that `ssh` uses; the answer says whether it came over a direct UDP path or
+    through the relay.
 - **One key per enrollment:** the relay allows one connection per node key and replaces the
   older one, so a device using one key for two homelabs on the same relay would disconnect
   itself whenever it used both. Each enrollment therefore has its own node key, stored with that
