@@ -6,6 +6,17 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
+- `catflap list` and `/list` in the Telegram bot show when each device was last seen, and for
+  connected devices whether the connection is direct or goes through the relay. `catflap status`
+  and `/status` count the devices connected right now.
+- `catflap ping ALIAS` on a client pings the homelab through the tunnel: latency, and whether the
+  path is direct or through the relay.
+- Update alerts: once a day the homelab asks GitHub for the latest release and sends an alert
+  when there's a newer one (once per version); `catflap status` and `/status` show it too. Turn
+  it off with `"check_updates": false` in the homelab settings file.
+- Tab completion for bash, zsh, fish and PowerShell (`catflap completion SHELL`), including
+  device names, aliases, channels and ports.
+
 ## v0.5.1 (2026-11-16)
 
 - `catflap <command> -h` shows the command's options (or the overview, for commands without

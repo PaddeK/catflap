@@ -38,6 +38,7 @@ in `authorized_keys` without that restriction, that older entry still works as b
 | **Telegram** (if you use the bot) | read the bot chat: invites, device names, status | use an invite after it was used or expired |
 | **Someone in your Telegram account** | create invites, open the request window and approve devices, remove devices, all through the bot | stay unnoticed if you have a second alert channel |
 | **Your ntfy/Pushover service** | read alert texts (device names, IP addresses, request codes) | change anything, approve a request |
+| **GitHub** (the daily update check, unless turned off) | see the homelab's IP address and catflap version once a day | anything else: the homelab only reads the version number of the latest release; nothing is downloaded or installed |
 | **Anyone who knows your homelab's name and relay** (`homelab@relay.example.com`) | ask to join while your request window is open (a few times per hour) | get in without your approval in Telegram or on the homelab |
 | **Someone on your network or the internet** | see encrypted traffic to the relay | read it, or reach the homelab |
 

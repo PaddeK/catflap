@@ -38,7 +38,13 @@ type Config struct {
 	// on added SSH keys. By default an enrolled device's SSH key only works
 	// through the catflap tunnel, not directly over the LAN.
 	AllowSSHKeysFromAnywhere bool `json:"allow_ssh_keys_from_anywhere,omitempty"`
+	// CheckUpdates: once a day, ask GitHub for the latest catflap release
+	// and send an alert when there is a newer one. Default true.
+	CheckUpdates *bool `json:"check_updates,omitempty"`
 }
+
+// checkUpdates reports whether the daily update check is on.
+func (c Config) checkUpdates() bool { return c.CheckUpdates == nil || *c.CheckUpdates }
 
 // State is managed by catflap (do not edit while the daemon runs).
 type State struct {
@@ -50,6 +56,11 @@ type State struct {
 	Devices    []Device             `json:"devices"`
 	Invites    []Invite             `json:"invites"`
 	NeedsSync  bool                 `json:"needs_sync,omitempty"`
+	// SeenSince is when the homelab started recording when devices were
+	// last seen (Device.LastSeen); older versions didn't.
+	SeenSince time.Time `json:"seen_since,omitzero"`
+	// UpdateNotified is the newest release an update alert was sent for.
+	UpdateNotified string `json:"update_notified,omitempty"`
 }
 
 // Device is an enrolled client.
@@ -59,6 +70,7 @@ type Device struct {
 	SSHKey   string    `json:"ssh_key,omitempty"`
 	Hostname string    `json:"hostname,omitempty"` // as reported by the device
 	Added    time.Time `json:"added"`
+	LastSeen time.Time `json:"last_seen,omitzero"` // last tunnel traffic (saved every few minutes)
 }
 
 // Invite is an open invite. The secret stays on the homelab.

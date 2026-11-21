@@ -118,6 +118,14 @@ fast() { [ "$OUT" = 'SSH-2.0-catflap-e2e-fake|quick|' ] && awk -v d="$DT" 'BEGIN
 check "reconnect right after sessions is fast (${DT}s)" fast
 check "CATFLAP_NO_AGENT fallback works" bash -c "printf 'x\n' | CATFLAP_NO_AGENT=1 CATFLAP_DIR='$T/c1' timeout 30 '$CF' proxy testlab 22 2>/dev/null | head -1 | grep -q SSH-"
 
+echo "== activity and ping"
+check "list: the device is connected now" bash -c "$H '$CF' list | grep '^laptop ' | grep -qE 'now \((direct|relay)\)'"
+check "status counts connected devices" bash -c "$H '$CF' status | grep -q '(1 connected)'"
+client c1 ping testlab --count 3 > "$T/ping.log" 2>&1 || true
+check "ping: three replies with latency and path" bash -c "grep -q '3 of 3 pings answered' '$T/ping.log' && [ \$(grep -cE '^reply from testlab: [0-9.]+ ms, (direct|through the relay)' '$T/ping.log') = 3 ]"
+check "ping goes through the agent" bash -c "[ \$(grep -c 'agent: listening' '$T/c1/agent.log') = 1 ]"
+check "ping: unknown alias" bash -c "env CATFLAP_DIR='$T/c1' '$CF' ping nosuch 2>&1 | grep -q 'unknown homelab \"nosuch\" (known: testlab)'"
+
 echo "== attacks and edge cases"
 client c2 enroll "$INV" --ssh-key "$T/c2/id.pub" > "$T/c2a.log" 2>&1 && bad "reused invite accepted" || \
   check "reused invite refused" grep -q 'unknown, used or expired invite' "$T/c2a.log"
@@ -167,6 +175,8 @@ for _ in $(seq 100); do [ -S "$T/homelab/control.sock" ] && break; sleep 0.1; do
 OUT=$(printf 'again\n' | timeout 40 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 22 2>>"$T/proxy.err" | head -2 | tr -d '\r' | tr '\n' '|')
 check "device works after homelab restart" test "$OUT" = "SSH-2.0-catflap-e2e-fake|again|"
 check "list shows only phone" bash -c "$H '$CF' list | grep -q '^phone' && ! $H '$CF' list | grep -q '^laptop'"
+check "last seen survives the restart" python3 -I -c 'import json, sys
+s = json.load(open(sys.argv[1])); sys.exit(not all(d.get("last_seen") for d in s["devices"]))' "$T/homelab/homelab-state.json"
 
 echo "== forwards (live, no restart)"
 # firstline PORT [HOLD]: connect to localhost:PORT, print the first line;

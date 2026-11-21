@@ -17,7 +17,8 @@ package client
 //
 // Protocol: the caller sends one JSON line (agentRequest), the agent answers
 // with one JSON line (agentResponse); after an ok answer to "dial" the
-// connection carries the raw TCP stream to the homelab port.
+// connection carries the raw TCP stream to the homelab port. "probe" pings
+// the homelab through the tunnel (`catflap ping`).
 
 import (
 	"context"
@@ -48,17 +49,18 @@ const (
 )
 
 type agentRequest struct {
-	Op       string `json:"op"` // "dial", "ping" or "stop"
+	Op       string `json:"op"` // "dial", "probe", "ping" or "stop"
 	Alias    string `json:"alias,omitempty"`
 	Port     uint16 `json:"port,omitempty"`
 	Identity string `json:"identity"` // build identity of the caller
 }
 
 type agentResponse struct {
-	OK      bool   `json:"ok"`
-	Error   string `json:"error,omitempty"`
-	Restart bool   `json:"restart,omitempty"` // agent is from another build and retires
-	PID     int    `json:"pid,omitempty"`
+	OK      bool        `json:"ok"`
+	Error   string      `json:"error,omitempty"`
+	Restart bool        `json:"restart,omitempty"` // agent is from another build and retires
+	PID     int         `json:"pid,omitempty"`
+	Probe   *PingResult `json:"probe,omitempty"`
 }
 
 // AgentSocket returns the agent's socket path.
@@ -115,15 +117,21 @@ type remoteError struct{ msg string }
 func (e *remoteError) Error() string { return e.msg }
 
 func dialViaAgent(ctx context.Context, alias string, port uint16) (net.Conn, error) {
+	c, _, err := callAgent(ctx, agentRequest{Op: "dial", Alias: alias, Port: port})
+	return c, err
+}
+
+// callAgent sends req to the agent, starting one if needed. The returned
+// conn is open after an ok answer.
+func callAgent(ctx context.Context, req agentRequest) (net.Conn, agentResponse, error) {
 	sock, err := AgentSocket()
 	if err != nil {
-		return nil, err
+		return nil, agentResponse{}, err
 	}
 	if len(sock) > maxSocketPath {
-		return nil, fmt.Errorf("agent socket path too long: %s", sock)
+		return nil, agentResponse{}, fmt.Errorf("agent socket path too long: %s", sock)
 	}
-	id := buildIdentity()
-	req := agentRequest{Op: "dial", Alias: alias, Port: port, Identity: id}
+	req.Identity = buildIdentity()
 
 	started := false
 	deadline := time.Now().Add(agentStartWait)
@@ -131,24 +139,24 @@ func dialViaAgent(ctx context.Context, alias string, port uint16) (net.Conn, err
 		c, resp, err := agentRoundTrip(ctx, sock, req)
 		switch {
 		case err == nil && resp.OK:
-			return c, nil
+			return c, resp, nil
 		case err == nil && resp.Restart:
 			// An agent from another build is retiring; start ours.
 			started = false
 		case err == nil:
-			return nil, &remoteError{resp.Error}
+			return nil, resp, &remoteError{resp.Error}
 		}
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, resp, ctx.Err()
 		}
 		if !started {
 			if err := startAgent(sock); err != nil {
-				return nil, err
+				return nil, resp, err
 			}
 			started = true
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("agent did not start (see %s): %v", agentLogPath(sock), err)
+			return nil, resp, fmt.Errorf("agent did not start (see %s): %v", agentLogPath(sock), err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -221,22 +229,29 @@ var (
 // dialInProcess dials with an engine inside this process, shared by all
 // dials of the process (e.g. one `catflap forward`).
 func dialInProcess(ctx context.Context, alias string, port uint16) (net.Conn, error) {
-	inprocMu.Lock()
-	cl := inprocClients[alias]
-	if cl == nil {
-		st, _, err := Load()
-		if err != nil {
-			inprocMu.Unlock()
-			return nil, err
-		}
-		if cl, err = newTailcatClient(st, alias); err != nil {
-			inprocMu.Unlock()
-			return nil, err
-		}
-		inprocClients[alias] = cl
+	cl, err := inprocClient(alias)
+	if err != nil {
+		return nil, err
 	}
-	inprocMu.Unlock()
 	return cl.DialTCPPort(ctx, port)
+}
+
+func inprocClient(alias string) (*tailcat.Client, error) {
+	inprocMu.Lock()
+	defer inprocMu.Unlock()
+	if cl := inprocClients[alias]; cl != nil {
+		return cl, nil
+	}
+	st, _, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	cl, err := newTailcatClient(st, alias)
+	if err != nil {
+		return nil, err
+	}
+	inprocClients[alias] = cl
+	return cl, nil
 }
 
 // ---- agent side ----
@@ -426,6 +441,15 @@ func (a *agent) serve(ctx context.Context, c net.Conn) {
 		writeLine(c, agentResponse{OK: true, PID: os.Getpid()})
 		c.Close()
 		return
+	case "probe":
+		res, err := a.probe(ctx, req.Alias)
+		if err != nil {
+			writeLine(c, agentResponse{Error: err.Error()})
+		} else {
+			writeLine(c, agentResponse{OK: true, Probe: &res})
+		}
+		c.Close()
+		return
 	case "dial":
 	default:
 		writeLine(c, agentResponse{Error: "unknown op " + req.Op})
@@ -481,6 +505,18 @@ func (a *agent) dial(ctx context.Context, alias string, port uint16) (net.Conn, 
 	dctx, cancel = context.WithTimeout(ctx, agentDialTimeout)
 	defer cancel()
 	return cl.DialTCPPort(dctx, port)
+}
+
+// probe pings the homelab behind alias through the agent's engine.
+func (a *agent) probe(ctx context.Context, alias string) (PingResult, error) {
+	cl, fresh, err := a.client(alias)
+	if err != nil {
+		return PingResult{}, err
+	}
+	if !fresh {
+		cl.Ping(ctx) // re-register with a restarted homelab, as in dial
+	}
+	return discoPing(ctx, cl)
 }
 
 func isTimeout(err error) bool {

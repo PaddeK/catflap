@@ -54,8 +54,12 @@ type Daemon struct {
 	reqs     map[string]*pendingRequest // enrollment requests (tap to approve)
 	reqUntil time.Time                  // request window open until
 
-	shutdown context.CancelFunc // ends Run (control route POST /shutdown)
-	started  time.Time
+	shutdown  context.CancelFunc // ends Run (control route POST /shutdown)
+	started   time.Time
+	seenSaved time.Time // last time activity alone saved the state
+	seenDirty bool      // LastSeen changed since (guarded by mu)
+
+	latest string // newer catflap release, if the update check found one
 }
 
 // Run starts the homelab daemon and blocks until ctx is done.
@@ -72,6 +76,9 @@ func Run(ctx context.Context, p Paths) error {
 	}
 	if st.ServerKey.IsZero() || st.AgentToken == "" {
 		return errors.New("homelab state is incomplete; run `catflap setup homelab` again")
+	}
+	if st.SeenSince.IsZero() {
+		st.SeenSince = time.Now().Truncate(time.Second)
 	}
 	d := &Daemon{
 		cfg:   cfg,
@@ -125,10 +132,15 @@ func Run(ctx context.Context, p Paths) error {
 		// Run without alerts rather than not at all, but say so loudly.
 		d.logf("notify: %v; NOTIFICATIONS ARE OFF until this is fixed", err)
 	}
+	go d.updateLoop(ctx)
 	d.agentLoop(ctx)
 
 	// Shutting down (e.g. `catflap restart`): close open connections first and
 	// give the closing packets a moment to reach the clients.
+	d.refreshActivity()
+	d.mu.Lock()
+	d.saveLocked() // keeps LastSeen
+	d.mu.Unlock()
 	d.closeForwards()
 	time.Sleep(500 * time.Millisecond)
 	return nil
@@ -211,6 +223,7 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		d.pruneInvites()
 		d.pruneRequests()
+		d.refreshActivity()
 		d.mu.Lock()
 		needSync := d.st.NeedsSync
 		d.mu.Unlock()
@@ -534,10 +547,14 @@ type StatusInfo struct {
 	Relay     string    `json:"relay"`
 	Addr      string    `json:"addr"`
 	Devices   int       `json:"devices"`
+	Connected int       `json:"connected"` // devices connected right now
 	Invites   int       `json:"invites"`
 	Forwards  []string  `json:"forwards"`
 	NeedsSync bool      `json:"needs_sync"`
 	Started   time.Time `json:"started"`
+	// Update is a newer catflap release than the running one, if the daily
+	// update check found one.
+	Update string `json:"update,omitempty"`
 }
 
 func (d *Daemon) serveControl(ctx context.Context) error {
@@ -615,13 +632,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		ctlJSON(w, map[string]int{"sent": sent})
 	})
 	mux.HandleFunc("GET /devices", func(w http.ResponseWriter, r *http.Request) {
-		d.mu.Lock()
-		out := slices.Clone(d.st.Devices)
-		d.mu.Unlock()
-		if out == nil {
-			out = []Device{}
-		}
-		ctlJSON(w, out)
+		ctlJSON(w, d.deviceInfos())
 	})
 	mux.HandleFunc("DELETE /devices/{name}", func(w http.ResponseWriter, r *http.Request) {
 		res, err := d.removeDevice(r.Context(), r.PathValue("name"), "")
@@ -632,8 +643,9 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		ctlJSON(w, res)
 	})
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+		connected := len(d.refreshActivity())
 		d.mu.Lock()
-		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), NeedsSync: d.st.NeedsSync, Started: d.started}
+		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), Connected: connected, NeedsSync: d.st.NeedsSync, Started: d.started, Update: d.latest}
 		for _, inv := range d.st.Invites {
 			if inv.Used == nil {
 				s.Invites++
