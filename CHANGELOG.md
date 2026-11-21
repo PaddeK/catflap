@@ -6,6 +6,8 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
+## v0.6.0 (2026-11-21)
+
 - `catflap list` and `/list` in the Telegram bot show when each device was last seen, and for
   connected devices whether the connection is direct or goes through the relay. `catflap status`
   and `/status` count the devices connected right now.
