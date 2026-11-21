@@ -29,6 +29,7 @@ import (
 	"github.com/PaddeK/catflap/internal/homelab"
 	"github.com/PaddeK/catflap/internal/relay"
 	"github.com/PaddeK/catflap/internal/setup"
+	"github.com/PaddeK/catflap/internal/update"
 )
 
 // Set by the release build (-ldflags "-X main.version=...").
@@ -77,7 +78,7 @@ Other:
   catflap status                       show what is set up on this machine
   catflap restart [relay|homelab]      restart the service, e.g. after an upgrade
   catflap uninstall [relay|homelab|client]   remove catflap from this machine (asks first)
-  catflap version
+  catflap version                      show the version and check for a newer release
   catflap completion bash|zsh|fish|powershell   tab completion (see docs/using-catflap.md)
   catflap <command> -h                 show the options of a command
 
@@ -116,7 +117,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Print(usage)
 		return nil
 	case "version", "--version":
-		return cmdVersion()
+		return cmdVersion(ctx, os.Stdout)
 	case "setup":
 		if len(args) == 0 {
 			return errors.New("usage: catflap setup relay|homelab ...")
@@ -975,7 +976,7 @@ func cmdStatus(ctx context.Context) error {
 				}
 				fmt.Printf("homelab: %q via %s - running catflap %s, %d device(s) (%d connected), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, ver, s.Devices, s.Connected, s.Invites, strings.Join(s.Forwards, ", "), sync)
 				if s.Update != "" {
-					fmt.Printf("         update available: catflap %s (how to upgrade: %s)\n", s.Update, homelab.UpgradeDocURL)
+					fmt.Printf("         update available: catflap %s (how to upgrade: %s)\n", s.Update, update.UpgradeDocURL)
 				}
 			}
 		}
@@ -1184,8 +1185,8 @@ func cmdRestart(ctx context.Context, args []string) error {
 	return fmt.Errorf("unknown role %q (want relay or homelab)", role)
 }
 
-func cmdVersion() error {
-	fmt.Printf("catflap %s\n", version)
+func cmdVersion(ctx context.Context, w io.Writer) error {
+	fmt.Fprintf(w, "catflap %s\n", version)
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		var rev, modified string
 		for _, s := range bi.Settings {
@@ -1199,14 +1200,32 @@ func cmdVersion() error {
 			}
 		}
 		if rev != "" {
-			fmt.Printf("  commit %s%s\n", rev, modified)
+			fmt.Fprintf(w, "  commit %s%s\n", rev, modified)
 		}
 		for _, d := range bi.Deps {
 			if d.Path == "github.com/tailscale/tailcat" || d.Path == "tailscale.com" {
-				fmt.Printf("  %s %s\n", d.Path, d.Version)
+				fmt.Fprintf(w, "  %s %s\n", d.Path, d.Version)
 			}
 		}
-		fmt.Printf("  %s\n", bi.GoVersion)
+		fmt.Fprintf(w, "  %s\n", bi.GoVersion)
 	}
+	checkLatest(ctx, w)
 	return nil
+}
+
+// checkLatest asks GitHub whether a newer release exists. Only release
+// builds check; CATFLAP_NO_UPDATE_CHECK=1 turns it off.
+func checkLatest(ctx context.Context, w io.Writer) {
+	if !update.IsRelease(version) || os.Getenv("CATFLAP_NO_UPDATE_CHECK") != "" {
+		return
+	}
+	rel, err := update.Latest(ctx, 5*time.Second)
+	switch {
+	case err != nil:
+		fmt.Fprintf(w, "\nCould not check for a newer version: %v\n", err)
+	case update.Newer(rel.Version, version):
+		fmt.Fprintf(w, "\nUpdate available: catflap %s (%s)\nHow to upgrade: %s\n", rel.Version, rel.URL, update.UpgradeDocURL)
+	default:
+		fmt.Fprintln(w, "\nThis is the latest release.")
+	}
 }

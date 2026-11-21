@@ -356,7 +356,8 @@ from the relay's side, for homelabs that are gone.
   https://api.github.com/repos/PaddeK/catflap/releases/latest`. A newer release (plain
   `X.Y.Z` versions only; dev builds never check) gives one alert per version and shows in
   `status`. Nothing but the request itself (IP address, `User-Agent: catflap/VERSION`) reaches
-  GitHub.
+  GitHub. `catflap version` makes the same request once when it's run, on any machine
+  (`CATFLAP_NO_UPDATE_CHECK=1` skips it); `status` on relays and clients never does.
 - Files: `~/.config/catflap/homelab.json` (settings: relay, name, forwards, ssh user,
   authorized_keys file, LAN restriction, update check; see the
   [user guide](using-catflap.md#homelab-settings-file)),

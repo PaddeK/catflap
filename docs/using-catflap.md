@@ -224,7 +224,8 @@ store them when they enroll.
 **You hear about new versions:** once a day the homelab asks GitHub for the latest release. When
 there's a newer one, it sends an alert on your channels (once per version), and `catflap status`
 and `/status` in the Telegram bot show it. Turn it off with `check_updates` in the
-[settings file](#homelab-settings-file).
+[settings file](#homelab-settings-file). On any machine, `catflap version` checks for a newer
+release when you run it (set `CATFLAP_NO_UPDATE_CHECK=1` to skip that).
 
 Run the install command again on each machine. It verifies the download and replaces catflap in
 place; running catflap processes keep the old version until they restart.

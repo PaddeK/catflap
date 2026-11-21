@@ -14,6 +14,8 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 - Update alerts: once a day the homelab asks GitHub for the latest release and sends an alert
   when there's a newer one (once per version); `catflap status` and `/status` show it too. Turn
   it off with `"check_updates": false` in the homelab settings file.
+- `catflap version` checks GitHub for a newer release, on any machine (`CATFLAP_NO_UPDATE_CHECK=1`
+  skips it).
 - Tab completion for bash, zsh, fish and PowerShell (`catflap completion SHELL`), including
   device names, aliases, channels and ports.
 
