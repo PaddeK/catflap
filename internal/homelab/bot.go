@@ -133,7 +133,7 @@ func (b *bot) edit(ctx context.Context, msg int64, text string) {
 
 func (b *bot) help() string {
 	return fmt.Sprintf(`<b>catflap bot for homelab %s</b>
-/invite &lt;name&gt; – one-time invite for a new device (valid %d min)
+/invite &lt;name&gt; [7d] – one-time invite for a new device (valid %d min); with a duration, the device is temporary
 /invites – open invites
 /revoke &lt;name&gt; – revoke an open invite
 /list – enrolled devices
@@ -171,9 +171,20 @@ func (b *bot) onMessage(ctx context.Context, m *notify.TMessage) {
 	case "/start", "/help":
 		b.send(ctx, b.help(), nil)
 	case "/invite":
-		if name, ok := one("/invite <name>"); ok {
-			b.invite(ctx, name)
+		usage := "Usage: <code>/invite &lt;name&gt; [7d]</code> (with a duration, the device is removed that long after it enrolls)"
+		if len(args) < 1 || len(args) > 2 {
+			b.send(ctx, usage, nil)
+			break
 		}
+		var ttl time.Duration
+		if len(args) == 2 {
+			var err error
+			if ttl, err = ParseDuration(args[1]); err != nil || ttl <= 0 {
+				b.send(ctx, usage, nil)
+				break
+			}
+		}
+		b.invite(ctx, strings.ToLower(args[0]), ttl)
 	case "/invites":
 		b.listInvites(ctx)
 	case "/revoke":
@@ -199,18 +210,22 @@ func (b *bot) onMessage(ctx context.Context, m *notify.TMessage) {
 	}
 }
 
-func (b *bot) invite(ctx context.Context, name string) {
-	res, err := b.d.createInvite(ctx, name, botInviteTTL, b.ch.Name, false)
+func (b *bot) invite(ctx context.Context, name string, deviceTTL time.Duration) {
+	res, err := b.d.createInvite(ctx, InviteOptions{Name: name, TTL: botInviteTTL, DeviceTTL: deviceTTL, Origin: b.ch.Name})
 	if err != nil {
 		b.send(ctx, "Could not create the invite: "+esc(err.Error()), nil)
 		return
+	}
+	temp := ""
+	if deviceTTL > 0 {
+		temp = fmt.Sprintf("\n\nTemporary device: it is removed %s after it enrolls.", HumanDuration(deviceTTL))
 	}
 	id := b.send(ctx, fmt.Sprintf(`Invite for <b>%s</b>, one use, valid until %s:
 
 <code>catflap enroll %s</code>
 
-Tap the line to copy it, then run it on the new device. Telegram can read this chat, so the invite is short-lived, and this message goes away once it's used or expired.`,
-		esc(name), when(res.Expires), esc(res.Code)), nil)
+Tap the line to copy it, then run it on the new device. Telegram can read this chat, so the invite is short-lived, and this message goes away once it's used or expired.%s`,
+		esc(name), when(res.Expires), esc(res.Code), temp), nil)
 	if id == 0 {
 		// Couldn't deliver it: nobody can use it, so don't leave it open.
 		b.d.revokeInvite(ctx, name)
@@ -282,7 +297,11 @@ func (b *bot) listDevices(ctx context.Context) {
 		if dev.Active {
 			seen = "connected " + dev.LastSeenText(time.Now())
 		}
-		lines = append(lines, fmt.Sprintf("• <b>%s</b>%s, %s, enrolled %s", esc(dev.Name), host, seen, dev.Added.Local().Format("2006-01-02")))
+		exp := ""
+		if !dev.Expires.IsZero() {
+			exp = ", expires " + when(dev.Expires)
+		}
+		lines = append(lines, fmt.Sprintf("• <b>%s</b>%s, %s, enrolled %s%s", esc(dev.Name), host, seen, dev.Added.Local().Format("2006-01-02"), exp))
 	}
 	b.send(ctx, strings.Join(lines, "\n"), nil)
 }
@@ -299,7 +318,7 @@ func (b *bot) status(ctx context.Context) {
 	b.d.mu.Unlock()
 	var fwd []string
 	for _, f := range b.d.forwardList() {
-		fwd = append(fwd, fmt.Sprintf("%d→%s", f.Port, f.Target))
+		fwd = append(fwd, strings.Replace(f.String(), "->", "→", 1))
 	}
 	relay := "in sync"
 	if sync {
@@ -446,7 +465,7 @@ func (b *bot) onRequestButton(ctx context.Context, cb *notify.TCallback, approve
 	var name string
 	var err error
 	if approve {
-		name, err = b.d.approveRequest(ctx, id, b.ch.Name)
+		name, err = b.d.approveRequest(ctx, id, b.ch.Name, 0)
 	} else {
 		name, err = b.d.denyRequest(ctx, id, b.ch.Name)
 	}

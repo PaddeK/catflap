@@ -180,11 +180,11 @@ an outgoing HTTPS request from the homelab, and the bot long-polls Telegram.
   - Messages go out in the background with three attempts per message, so a broken channel never
     holds up the homelab. Errors never contain the Telegram URL (it holds the bot token).
 - **Alerts**, to every channel: device enrolled (high priority, with the remove command), device
-  removed, invite created, **failed enrollment** (tampered, expired or reused invite: someone
+  removed, temporary device expired, expiry changed, invite created, **failed enrollment** (tampered, expired or reused invite: someone
   trying something), relay unreachable for 10 minutes and reachable again, and a stranger writing
   to the bot. A request that came from the bot is answered in Telegram, so its alert goes only to
   the other channels.
-- **Telegram invite bot:** `/invite <name>`, `/invites`, `/revoke <name>`, `/list`,
+- **Telegram invite bot:** `/invite <name> [duration]`, `/invites`, `/revoke <name>`, `/list`,
   `/remove <name>`, `/requests`, `/status`.
   - **One chat only.** `notify add telegram` links the chat that opens
     `t.me/<bot>?start=<one-time code>`; a stranger can't link instead. Everyone else is ignored,
@@ -335,12 +335,24 @@ from the relay's side, for homelabs that are gone.
   - `catflap forward add/remove` changes forwards through the control socket while the daemon
     runs: the listener opens or closes immediately, no tunnel restart. `remove` also closes
     connections still open on that port.
-  - Forwards are saved in `homelab.json`; only its `forwards` key is rewritten, so other hand
-    edits survive. An explicit `"forwards": {}` means no ports at all.
+  - Forwards are saved in `homelab.json`; only its `forwards` and `forward_only` keys are
+    rewritten, so other hand edits survive. An explicit `"forwards": {}` means no ports at all.
+  - Per-device ports (`forward add PORT --only DEV,…`, saved as `forward_only`): tailcat's packet
+    filter admits a port for every peer, so the forward checks each accepted connection's peer
+    key against the device list and closes it at once if the device isn't listed (logged as
+    `refused`). Changing the list cuts open connections of devices that lost access. The check
+    goes by device name, so an invited name can be listed before it enrolls and a `--replace`
+    re-enrollment keeps its ports. A newer `catflap` refuses `--only` (and `--expires`) while
+    an older daemon still runs, which would ignore them: `status` lists the daemon's features.
   - A target may be another machine in the homelab's LAN (`8080=192.168.1.50:80`). Only enrolled
     devices can reach any forward; the homelab connects to the target as itself.
 - Relay loop: long-polls the relay for events (enrollments, requests), verifies, admits, and
   re-sends the device list when a sync is pending.
+- Temporary devices: a device may have an expiry time (`invite --expires` and `approve
+  --expires` set it at enrollment, counted from then; `catflap expire` sets or clears it later).
+  Each pass of the relay loop (about every 25 s; every minute while the relay is unreachable) removes
+  devices whose time is up, through the same path as `catflap remove` (all three gates, alert
+  "temporary device removed").
 - Control socket (`control.sock` in the state directory, mode 600) for every homelab command
   (`invite`, `invites`, `list`, `remove`, `forward`, `notify`, `requests`, `approve`, `deny`,
   `status`) and for the service code (`/shutdown`, `/uninstall/keys`). The daemon is the only

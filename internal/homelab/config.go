@@ -31,6 +31,10 @@ type Config struct {
 	// in its LAN). Only these ports are reachable through the tunnel.
 	// Default: {"22": "127.0.0.1:22"}. Managed with `catflap forward`.
 	Forwards map[string]string `json:"forwards"`
+	// ForwardOnly limits forwards to some devices, by name: port -> device
+	// names. A port without an entry is open to every enrolled device.
+	// Managed with `catflap forward add PORT --only DEVICE`.
+	ForwardOnly map[string][]string `json:"forward_only,omitempty"`
 	// AuthorizedKeys is the authorized_keys file catflap manages (gate 3).
 	// Empty means ~/.ssh/authorized_keys; "off" disables SSH key management.
 	AuthorizedKeys string `json:"authorized_keys,omitempty"`
@@ -71,6 +75,9 @@ type Device struct {
 	Hostname string    `json:"hostname,omitempty"` // as reported by the device
 	Added    time.Time `json:"added"`
 	LastSeen time.Time `json:"last_seen,omitzero"` // last tunnel traffic (saved every few minutes)
+	// Expires is when the homelab removes the device by itself (temporary
+	// devices: `invite --expires`, `catflap expire`). Zero: never.
+	Expires time.Time `json:"expires,omitzero"`
 }
 
 // Invite is an open invite. The secret stays on the homelab.
@@ -89,6 +96,9 @@ type Invite struct {
 	// Replace lets the invite re-enroll an existing device of the same name
 	// (`invite --replace`, `homelab move`): its old key and SSH key go.
 	Replace bool `json:"replace,omitempty"`
+	// DeviceTTL makes the enrolled device temporary: it is removed this
+	// long after it enrolls (`invite --expires`).
+	DeviceTTL time.Duration `json:"device_ttl,omitempty"`
 }
 
 // UsedInvite remembers an approval until the relay has it.
@@ -168,6 +178,19 @@ func LoadConfig(p Paths) (Config, error) {
 		}
 		if err := validateTarget(t); err != nil {
 			return c, fmt.Errorf("homelab config: %v", err)
+		}
+	}
+	for p, names := range c.ForwardOnly {
+		if _, ok := c.Forwards[p]; !ok {
+			return c, fmt.Errorf("homelab config: forward_only: port %q is not forwarded", p)
+		}
+		if len(names) == 0 {
+			return c, fmt.Errorf("homelab config: forward_only: port %s has no devices (remove the entry to open it to all devices)", p)
+		}
+		for _, n := range names {
+			if !ValidName(n) {
+				return c, fmt.Errorf("homelab config: forward_only: bad device name %q", n)
+			}
 		}
 	}
 	return c, nil

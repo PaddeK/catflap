@@ -60,7 +60,7 @@ func TestCompletionFlags(t *testing.T) {
 	flagOutput = io.Discard
 	t.Setenv("CATFLAP_DIR", t.TempDir())
 	values := map[string]string{"--forward": "22", "--count": "1", "--http-port": "80", "--stun-port": "3478",
-		"--ttl": "1h", "--for": "1h"}
+		"--ttl": "1h", "--for": "1h", "--expires": "7d"}
 	var walk func(path []string, s *spec)
 	walk = func(path []string, s *spec) {
 		for _, f := range s.flags {
@@ -99,5 +99,23 @@ func TestCompletionScripts(t *testing.T) {
 	cmd.Stdin = strings.NewReader(completionScripts["bash"])
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("bash script: %v\n%s", err, out)
+	}
+}
+
+// TestOwnHelp checks that `catflap CMD -h` shows the command's own options
+// for every command that has some (instead of the general usage).
+func TestOwnHelp(t *testing.T) {
+	flagOutput = io.Discard
+	t.Setenv("CATFLAP_DIR", t.TempDir())
+	for name, s := range completionTree.sub {
+		if len(s.flags) == 0 || slices.Contains(completionTree.hidden, name) {
+			continue
+		}
+		if !slices.Contains(ownHelp, name) {
+			t.Errorf("catflap %s has options, but isn't in ownHelp", name)
+		}
+		if err := run(context.Background(), []string{name, "-h"}); !errors.Is(err, flag.ErrHelp) {
+			t.Errorf("catflap %s -h: %v", name, err)
+		}
 	}
 }

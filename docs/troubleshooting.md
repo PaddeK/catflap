@@ -167,6 +167,17 @@ The tunnel can't reach the homelab. Check in this order:
 3. Is the device still enrolled? `catflap list` on the homelab. A removed device gets nothing.
 4. Is the relay running? `systemctl status catflap-relay` on the VPS.
 
+### A port closes the connection right away (ssh: "Connection closed by remote host")
+The port is limited to some devices (`catflap forward add PORT --only …`) and this device isn't
+one of them. `catflap forward list` on the homelab shows who may use each port, and the
+homelab's log has a `refused` line for each attempt. Add the device with
+`catflap forward add PORT --only dev1,dev2,…` (the whole list).
+
+### A device is gone from `catflap list`
+If it was a temporary device (`--expires`), its time ran out: the homelab removed it and sent a
+"temporary device removed" alert. Invite it again, or next time give it more time beforehand
+with `catflap expire NAME 30d`.
+
 ### "the homelab is not running here"
 You ran a homelab command (`invite`, `list`, …) but the homelab isn't running, or you're on the
 wrong machine or user. Start it with `catflap restart` and check its log (the message shows
@@ -234,6 +245,11 @@ of the box.
 
 ### The homelab still runs the old version after an upgrade
 Run `catflap restart` on it. `catflap status` shows the running version.
+
+### "the running homelab is an older version that doesn't know --only" (or `--expires`)
+The command is newer than the homelab that runs. An older homelab would ignore the option and,
+for `--only`, leave the port open to every device, so catflap stops instead. Run
+`catflap restart`, then the command again.
 
 ### `catflap list` shows "?" under LAST SEEN
 The running homelab is from before v0.6, which didn't record it. `catflap restart` starts the

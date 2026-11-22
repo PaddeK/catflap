@@ -24,6 +24,8 @@ words are explained [at the end of Getting started](getting-started.md#words-use
 | enroll an existing device again, e.g. after reinstalling it (*homelab*) | `catflap invite NAME --replace`: when the device enrolls, its old entry and SSH key are replaced; name and ssh alias stay |
 | show open invites (*homelab*) | `catflap invites` |
 | revoke an open invite (*homelab*) | `catflap invites --revoke NAME` |
+| invite a temporary device, e.g. a friend's laptop for a week (*homelab*) | `catflap invite NAME --expires 7d`: removed automatically 7 days after it enrolls |
+| make a device temporary, give it more time, or make it permanent again (*homelab*) | `catflap expire NAME 3d` (from now), `catflap expire NAME never` |
 | enroll (*client*) | `catflap enroll cfi1-…` |
 | list devices, with when each was last seen (*homelab*) | `catflap list` |
 | remove a device (*homelab*) | `catflap remove NAME` |
@@ -45,6 +47,12 @@ it is removed from `authorized_keys`, and the relay stops admitting it. No resta
 was in `authorized_keys` before (you added it yourself), it stays, and `catflap remove` says so.
 `catflap forget` on a client only removes the local entry; the homelab still lists the device
 until you remove it there.
+
+**Temporary devices** are removed by the homelab when their time is up, exactly as with
+`catflap remove`, and you get an alert. `catflap list` shows when (column EXPIRES). Use them for
+guests and borrowed machines, so access doesn't stay around because nobody thought of removing
+it. `--expires` also works with `catflap approve` and in the bot (`/invite NAME 7d`). A device
+re-enrolled with `--replace` keeps its expiry time unless the invite sets a new one.
 
 **Lost or stolen device:** remove it right away, from the homelab or from your phone (`/remove`,
 see [the Telegram bot](#the-telegram-invite-bot)). See also [Security](security.md#if-something-is-lost).
@@ -87,9 +95,20 @@ on your network, because anyone reaching it would use your device's access.
 | expose another machine in the homelab's LAN (*homelab*) | `catflap forward add 8080=192.168.1.50:80` |
 | list exposed ports (*homelab*) | `catflap forward list` |
 | close a port (*homelab*) | `catflap forward remove PORT` (also cuts open connections) |
+| open a port to some devices only (*homelab*) | `catflap forward add 1880 --only laptop,phone` |
+| open it to every device again (*homelab*) | `catflap forward add 1880` (without `--only`) |
 | use another local port (*client*) | `catflap forward homelab 8000:1880` → `http://localhost:8000` |
 
-Every enrolled device can reach every forwarded port. Connections to other ports are refused.
+By default every enrolled device can reach every forwarded port; connections to other ports are
+refused. With `--only`, the port is open to the devices you list and no other: their
+connections are closed right away, and the homelab logs them. `catflap forward list` shows who
+may use each port. `catflap forward add` always sets the whole forward, so run it again with the
+new list to change it; a device that loses access is disconnected from that port at once.
+
+`--only` goes by device name. You can name a device that only has an open invite so far, and a
+device re-enrolled with `--replace` keeps its access. If you remove a device and later enroll
+another one under the same name, the new one gets the same ports.
+
 For a one-off you can also use SSH: `ssh -L 1880:localhost:1880 homelab`.
 
 ## Alerts on your phone and the Telegram bot
@@ -97,7 +116,7 @@ For a one-off you can also use SSH: `ssh -L 1880:localhost:1880 homelab`.
 The homelab can tell you whenever something security-relevant happens:
 
 - a device enrolled (with the command to remove it, in case it wasn't you);
-- a device was removed, an invite was created;
+- a device was removed, an invite was created, a temporary device's time ran out;
 - **an enrollment failed** (a tampered, expired or reused invite: someone trying something);
 - the relay has been unreachable for 10 minutes, and when it's back;
 - someone else wrote to your Telegram bot;
@@ -133,7 +152,7 @@ your chat (and only yours) to the homelab. Answer "yes" to run the bot. Then, in
 
 | Command | Does |
 |---|---|
-| `/invite NAME` | one-time invite, valid 15 minutes; tap the code to copy it |
+| `/invite NAME` | one-time invite, valid 15 minutes; tap the code to copy it. `/invite NAME 7d`: a temporary device, removed 7 days after it enrolls |
 | `/invites` | open invites |
 | `/revoke NAME` | revoke an open invite |
 | `/list` | enrolled devices |
@@ -167,7 +186,8 @@ rest of the time:
    another with `--name laptop`.
 3. Your Telegram bot shows the request with the same code and **Approve** / **Deny** buttons.
    Compare the codes, then tap **Approve**. Without the bot: `catflap requests` on the homelab
-   lists the requests, `catflap approve 731773` (or `catflap deny …`) decides.
+   lists the requests, `catflap approve 731773` (or `catflap deny …`) decides;
+   `catflap approve 731773 --expires 1d` makes it a [temporary device](#devices).
 4. The device is enrolled as with an invite: ssh config, tunnel check, done. Close the window
    early with `/requests off` or `catflap requests off`.
 

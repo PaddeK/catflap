@@ -22,11 +22,14 @@ secret, the homelab checks that the keys it received are exactly the ones the ne
 so nobody in between can swap in their own. An invite works once, for 15 minutes by default, for
 one device name.
 
-**Only forwarded ports are reachable,** port 22 by default. The SSH key entry catflap adds only
+**Only forwarded ports are reachable,** port 22 by default, and a port can be limited to some
+devices (`catflap forward add PORT --only DEVICE`). The SSH key entry catflap adds only
 works through catflap (`from="127.0.0.1,::1"`), not over your LAN. (If the same key was already
 in `authorized_keys` without that restriction, that older entry still works as before.)
 
-**`catflap remove` closes all three gates at once,** without restarts.
+**`catflap remove` closes all three gates at once,** without restarts. Temporary devices
+(`catflap invite NAME --expires 7d`) are removed the same way when their time is up, so a
+guest's access can't be forgotten.
 
 ## Who can see or do what
 

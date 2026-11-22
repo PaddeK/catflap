@@ -6,6 +6,16 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
+- Temporary devices: `catflap invite NAME --expires 7d` removes the device automatically 7 days
+  after it enrolls, with an alert. `catflap expire NAME 3d|never` changes that for any device;
+  `catflap approve CODE --expires 1d` and `/invite NAME 7d` in the Telegram bot work too.
+  `catflap list` shows when temporary devices expire.
+- Ports for some devices only: `catflap forward add 1880 --only laptop,phone`. Other devices'
+  connections to that port are closed right away; `catflap forward list` shows who may use each
+  port. The setting is stored in the homelab settings file as `forward_only`; an older catflap
+  version ignores it, so after a downgrade those ports are open to every device again.
+- Fixed: `catflap ping -h` showed the general help instead of the ping options.
+
 ## v0.6.0 (2026-11-21)
 
 - `catflap list` and `/list` in the Telegram bot show when each device was last seen, and for

@@ -45,13 +45,17 @@ Setup (once per machine):
 
 Homelab administration:
   catflap invite <name> [--ttl 15m]    create a one-time invite for a device
-                                       (--replace: re-enroll an existing device)
+                                       (--replace: re-enroll an existing device;
+                                       --expires 7d: remove the device 7 days after it enrolls)
   catflap invites [--revoke <name>]    list or revoke open invites
   catflap list                         list enrolled devices
   catflap requests [on [--for 1h] | off]   let new devices ask to join (tap to approve)
-  catflap approve|deny <code>          decide a pending request
+  catflap approve|deny <code>          decide a pending request (approve --expires 7d: temporary)
   catflap remove <name>                remove a device (takes effect immediately)
-  catflap forward add <port>[=host:port]   make a port reachable through the tunnel
+  catflap expire <name> <7d|never>     remove a device automatically after a while, or not
+  catflap forward add <port>[=host:port] [--only dev1,dev2]
+                                       make a port reachable through the tunnel
+                                       (--only: just for these devices)
   catflap forward remove <port>        close it again (cuts open connections)
   catflap forward list                 show reachable ports (default: 22 only)
   catflap homelab move --join <code>   move to another relay (new hostname/port);
@@ -102,13 +106,17 @@ func main() {
 	}
 }
 
+// ownHelp are the commands with options of their own: `catflap CMD -h`
+// shows those instead of the general usage.
+var ownHelp = []string{"invite", "invites", "enroll", "uninstall", "requests", "ping", "approve"}
+
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		fmt.Print(usage)
 		return nil
 	}
 	cmd, args := args[0], args[1:]
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") && !slices.Contains([]string{"invite", "invites", "enroll", "uninstall", "requests"}, cmd) {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") && !slices.Contains(ownHelp, cmd) {
 		fmt.Print(usage)
 		return nil
 	}
@@ -159,6 +167,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdList(ctx)
 	case "remove", "rm":
 		return cmdRemove(ctx, args)
+	case "expire":
+		return cmdExpire(ctx, args)
 	case "enroll":
 		return cmdEnroll(ctx, args)
 	case "proxy":
@@ -229,7 +239,7 @@ func durationVar(fs *flag.FlagSet, name string, def time.Duration, usage string)
 type durationFlag struct{ d *time.Duration }
 
 func (f durationFlag) String() string {
-	if f.d == nil {
+	if f.d == nil || *f.d == 0 { // no "(default 0s)" in -h
 		return ""
 	}
 	return f.d.String()
@@ -241,6 +251,20 @@ func (f durationFlag) Set(s string) error {
 		return err
 	}
 	*f.d = d
+	return nil
+}
+
+// listFlag collects comma-separated values; the flag may repeat.
+type listFlag []string
+
+func (f *listFlag) String() string { return strings.Join(*f, ",") }
+
+func (f *listFlag) Set(s string) error {
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			*f = append(*f, v)
+		}
+	}
 	return nil
 }
 
@@ -559,6 +583,19 @@ func control() (*api.Client, error) {
 	return homelab.Control(p), nil
 }
 
+// requireFeature refuses to go on if the running homelab is too old for an
+// option (it would ignore it without a word).
+func requireFeature(ctx context.Context, c *api.Client, feature, option string) error {
+	var s homelab.StatusInfo
+	if err := c.Do(ctx, "GET", "/status", nil, &s); err != nil {
+		return ctlErr(err)
+	}
+	if !slices.Contains(s.Features, feature) {
+		return fmt.Errorf("the running homelab is an older version that doesn't know %s; restart it first (catflap restart), then try again", option)
+	}
+	return nil
+}
+
 func ctlErr(err error) error {
 	var ae *api.Error
 	if errors.As(err, &ae) {
@@ -588,19 +625,25 @@ func cmdInvite(ctx context.Context, args []string) error {
 	fs := newFlags("invite")
 	ttl := durationVar(fs, "ttl", 15*time.Minute, "how long the invite stays valid, a `duration` like 2h or 7d (max 90d)")
 	replace := fs.Bool("replace", false, "re-enroll an existing device: its old entry and SSH key are replaced")
+	expires := durationVar(fs, "expires", 0, "temporary device: remove it this long after it enrolls, a `duration` like 8h or 7d")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 1 {
-		return errors.New("usage: catflap invite <device-name> [--ttl 15m] [--replace]")
+		return errors.New("usage: catflap invite <device-name> [--ttl 15m] [--replace] [--expires 7d]")
 	}
 	c, err := control()
 	if err != nil {
 		return err
 	}
+	if *expires > 0 {
+		if err := requireFeature(ctx, c, homelab.FeatureDeviceExpiry, "--expires"); err != nil {
+			return err
+		}
+	}
 	var res homelab.InviteResult
-	if err := c.Do(ctx, "POST", "/invite", map[string]any{"name": pos[0], "ttl": *ttl, "replace": *replace}, &res); err != nil {
+	if err := c.Do(ctx, "POST", "/invite", map[string]any{"name": pos[0], "ttl": *ttl, "replace": *replace, "expires": *expires}, &res); err != nil {
 		return ctlErr(err)
 	}
 	fmt.Printf(`Invite for %q (one use, valid until %s):
@@ -609,6 +652,9 @@ func cmdInvite(ctx context.Context, args []string) error {
 
 Run that on the device. Treat the code like a password until it is used.
 `, res.Name, res.Expires.Local().Format("2006-01-02 15:04"), res.Code)
+	if res.DeviceTTL > 0 {
+		fmt.Printf("The device is temporary: it is removed %s after it enrolls (change that with: catflap expire %s).\n", homelab.HumanDuration(res.DeviceTTL), res.Name)
+	}
 	return nil
 }
 
@@ -659,8 +705,13 @@ func cmdList(ctx context.Context) error {
 		return nil
 	}
 	now, untracked := time.Now(), false
+	temporary := slices.ContainsFunc(devs, func(d homelab.DeviceInfo) bool { return !d.Expires.IsZero() })
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tHOSTNAME\tLAST SEEN\tENROLLED\tSSH KEY\tNODE KEY")
+	expHead := ""
+	if temporary {
+		expHead = "\tEXPIRES"
+	}
+	fmt.Fprintln(tw, "NAME\tHOSTNAME\tLAST SEEN\tENROLLED"+expHead+"\tSSH KEY\tNODE KEY")
 	for _, d := range devs {
 		host := d.Hostname
 		if host == "" {
@@ -675,7 +726,14 @@ func cmdList(ctx context.Context) error {
 			nk = nk[:20] + "…"
 		}
 		untracked = untracked || d.TrackedSince.IsZero()
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", d.Name, host, d.LastSeenText(now), d.Added.Local().Format("2006-01-02"), ssh, nk)
+		exp := ""
+		if temporary {
+			exp = "\t-"
+			if !d.Expires.IsZero() {
+				exp = "\t" + d.Expires.Local().Format("2006-01-02 15:04")
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s%s\t%s\t%s\n", d.Name, host, d.LastSeenText(now), d.Added.Local().Format("2006-01-02"), exp, ssh, nk)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -713,10 +771,42 @@ func cmdRemove(ctx context.Context, args []string) error {
 	return nil
 }
 
+// cmdExpire makes a device temporary, or permanent again.
+func cmdExpire(ctx context.Context, args []string) error {
+	const use = "usage: catflap expire <device-name> <duration|never>   e.g. catflap expire phone 7d"
+	if len(args) != 2 {
+		return errors.New(use)
+	}
+	var in time.Duration
+	if args[1] != "never" {
+		var err error
+		if in, err = homelab.ParseDuration(args[1]); err != nil || in <= 0 {
+			return fmt.Errorf("bad duration %q\n%s", args[1], use)
+		}
+	}
+	c, err := control()
+	if err != nil {
+		return err
+	}
+	if err := requireFeature(ctx, c, homelab.FeatureDeviceExpiry, "catflap expire"); err != nil {
+		return err
+	}
+	var res struct{ Expires time.Time }
+	if err := c.Do(ctx, "PUT", "/devices/"+args[0]+"/expires", map[string]any{"in": in}, &res); err != nil {
+		return ctlErr(err)
+	}
+	if res.Expires.IsZero() {
+		fmt.Printf("%q no longer expires\n", args[0])
+	} else {
+		fmt.Printf("%q is removed automatically at %s\n", args[0], res.Expires.Local().Format("2006-01-02 15:04"))
+	}
+	return nil
+}
+
 // ---- forwards ----
 
 const forwardUsage = `usage:
-  on the homelab:  catflap forward add <port>[=host:port] | remove <port> | list
+  on the homelab:  catflap forward add <port>[=host:port] [--only dev1,dev2] | remove <port> | list
   on a client:     catflap forward <alias> [local:]<port>`
 
 func cmdForward(ctx context.Context, args []string) error {
@@ -755,22 +845,41 @@ func cmdForwardAdmin(ctx context.Context, sub string, args []string) error {
 	}
 	switch sub {
 	case "add":
-		if len(args) == 0 {
-			return errors.New("usage: catflap forward add <port>[=host:port] ...  e.g. 1880 or 8080=192.168.1.50:80")
+		fs := newFlags("forward add")
+		var only listFlag
+		fs.Var(&only, "only", "open the port only to these devices, as `dev1,dev2` (default: all devices)")
+		pos, err := parse(fs, args)
+		if err != nil {
+			return err
 		}
-		for _, a := range args {
+		if len(pos) == 0 {
+			return errors.New("usage: catflap forward add <port>[=host:port] ... [--only dev1,dev2]  e.g. 1880 or 8080=192.168.1.50:80")
+		}
+		onlySet := false
+		fs.Visit(func(f *flag.Flag) { onlySet = onlySet || f.Name == "only" })
+		if onlySet && len(only) == 0 {
+			return errors.New("--only needs device names, e.g. --only laptop,phone (leave it out to open the port to every device)")
+		}
+		who := "every device"
+		if len(only) > 0 {
+			who = strings.Join(only, ", ")
+			if err := requireFeature(ctx, c, homelab.FeatureForwardOnly, "--only"); err != nil {
+				return err
+			}
+		}
+		for _, a := range pos {
 			port, target, err := homelab.ParseForward(a)
 			if err != nil {
 				return err
 			}
 			var res map[string]bool
-			if err := c.Do(ctx, "PUT", fmt.Sprintf("/forwards/%d", port), map[string]string{"target": target}, &res); err != nil {
+			if err := c.Do(ctx, "PUT", fmt.Sprintf("/forwards/%d", port), map[string]any{"target": target, "only": []string(only)}, &res); err != nil {
 				return ctlErr(err)
 			}
 			if res["changed"] {
-				fmt.Printf("port %d -> %s is reachable through the tunnel now\n", port, target)
+				fmt.Printf("port %d -> %s is reachable through the tunnel now, for %s\n", port, target, who)
 			} else {
-				fmt.Printf("port %d -> %s was already forwarded\n", port, target)
+				fmt.Printf("port %d -> %s was already forwarded for %s\n", port, target, who)
 			}
 			fmt.Printf("  on a client: catflap forward <alias> %d\n", port)
 		}
@@ -799,9 +908,13 @@ func cmdForwardAdmin(ctx context.Context, sub string, args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "PORT\tTARGET")
+	fmt.Fprintln(tw, "PORT\tTARGET\tDEVICES")
 	for _, f := range fw {
-		fmt.Fprintf(tw, "%d\t%s\n", f.Port, f.Target)
+		who := "all"
+		if len(f.Only) > 0 {
+			who = strings.Join(f.Only, ", ")
+		}
+		fmt.Fprintf(tw, "%d\t%s\t%s\n", f.Port, f.Target, who)
 	}
 	return tw.Flush()
 }
@@ -1022,7 +1135,7 @@ func cmdHomelabMove(ctx context.Context, args []string) error {
 	fmt.Println("  - registers it with the new relay (it keeps its keys and devices) and removes it from the old one")
 	fmt.Println("  - restarts the homelab")
 	if len(info.Devices) > 0 {
-		fmt.Printf("  - creates a re-enroll invite for each device, valid %s: %s\n", humanDuration(*ttl), strings.Join(info.Devices, ", "))
+		fmt.Printf("  - creates a re-enroll invite for each device, valid %s: %s\n", homelab.HumanDuration(*ttl), strings.Join(info.Devices, ", "))
 		fmt.Println("Devices can't connect until they ran `catflap enroll` with their new invite.")
 	}
 	fmt.Println()
@@ -1052,19 +1165,6 @@ func cmdHomelabMove(ctx context.Context, args []string) error {
 	}
 	fmt.Println("\nEach device keeps its name and ssh alias; `catflap invites` shows the ones not used yet.")
 	return nil
-}
-
-// humanDuration formats e.g. 24h as "24 hours".
-func humanDuration(d time.Duration) string {
-	switch {
-	case d%(24*time.Hour) == 0 && d >= 48*time.Hour:
-		return fmt.Sprintf("%d days", d/(24*time.Hour))
-	case d%time.Hour == 0:
-		return fmt.Sprintf("%d hours", d/time.Hour)
-	case d%time.Minute == 0:
-		return fmt.Sprintf("%d minutes", d/time.Minute)
-	}
-	return d.String()
 }
 
 // cmdRequests shows or opens/closes the enrollment request window.
@@ -1128,19 +1228,41 @@ func cmdRequests(ctx context.Context, args []string) error {
 
 // cmdDecide approves or denies an enrollment request by code or name.
 func cmdDecide(ctx context.Context, action string, args []string) error {
-	if len(args) != 1 {
+	fs := newFlags(action)
+	var expires *time.Duration
+	if action == "approve" {
+		expires = durationVar(fs, "expires", 0, "temporary device: remove it after this long, a `duration` like 8h or 7d")
+	}
+	pos, err := parse(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		if action == "approve" {
+			return errors.New("usage: catflap approve <code or device name> [--expires 7d]")
+		}
 		return fmt.Errorf("usage: catflap %s <code or device name>", action)
 	}
 	c, err := control()
 	if err != nil {
 		return err
 	}
+	req := map[string]any{"code": pos[0]}
+	if expires != nil && *expires > 0 {
+		if err := requireFeature(ctx, c, homelab.FeatureDeviceExpiry, "--expires"); err != nil {
+			return err
+		}
+		req["expires"] = *expires
+	}
 	var res struct{ Name string }
-	if err := c.Do(ctx, "POST", "/requests/"+action, map[string]string{"code": args[0]}, &res); err != nil {
+	if err := c.Do(ctx, "POST", "/requests/"+action, req, &res); err != nil {
 		return ctlErr(err)
 	}
 	if action == "approve" {
 		fmt.Printf("approved %q: the device is enrolled\n", res.Name)
+		if *expires > 0 {
+			fmt.Printf("It is temporary: removed automatically in %s (change that with: catflap expire %s).\n", homelab.HumanDuration(*expires), res.Name)
+		}
 	} else {
 		fmt.Printf("denied the request from %q\n", res.Name)
 	}

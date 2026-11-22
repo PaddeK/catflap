@@ -123,7 +123,7 @@ func Run(ctx context.Context, p Paths) error {
 	defer d.srv.Close()
 	d.addr = d.srv.TailcatAddr()
 	d.startForwards()
-	d.logf("homelab %q up: relay %s, %d device(s), forwarding %s", cfg.Name, cfg.Relay, len(st.Devices), forwardsString(cfg.Forwards))
+	d.logf("homelab %q up: relay %s, %d device(s), forwarding %s", cfg.Name, cfg.Relay, len(st.Devices), forwardsString(d.forwardList()))
 
 	if err := d.serveControl(ctx); err != nil {
 		return err
@@ -223,6 +223,7 @@ func (d *Daemon) agentLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		d.pruneInvites()
 		d.pruneRequests()
+		d.expireDevices(ctx)
 		d.refreshActivity()
 		d.mu.Lock()
 		needSync := d.st.NeedsSync
@@ -441,13 +442,20 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 	}
 	// Gate 2: live allowlist. A replaced device loses its old key.
 	var oldKey key.NodePublic
+	var expires time.Time
+	if inv.DeviceTTL > 0 {
+		expires = time.Now().Add(inv.DeviceTTL).Truncate(time.Second)
+	}
 	if replaced >= 0 {
+		if expires.IsZero() {
+			expires = d.st.Devices[replaced].Expires // a re-enrolled device stays temporary
+		}
 		oldKey.UnmarshalText([]byte(d.st.Devices[replaced].NodeKey))
 		d.allow.Remove(oldKey)
 		d.st.Devices = slices.Delete(d.st.Devices, replaced, replaced+1)
 		d.st.NeedsSync = true // the relay drops the old key too
 	}
-	d.st.Devices = append(d.st.Devices, Device{Name: inv.Name, NodeKey: nk.String(), SSHKey: sshKey, Hostname: sanitize(r.Hostname), Added: time.Now()})
+	d.st.Devices = append(d.st.Devices, Device{Name: inv.Name, NodeKey: nk.String(), SSHKey: sshKey, Hostname: sanitize(r.Hostname), Added: time.Now(), Expires: expires})
 	d.allow.Add(nk)
 
 	reply, _ := json.Marshal(api.SealedReply{Name: inv.Name, Homelab: d.cfg.Name, Addr: string(d.addr), SSHUser: d.cfg.SSHUser})
@@ -477,7 +485,7 @@ func (d *Daemon) handleSubmission(ctx context.Context, s api.Submission) {
 		title = "device re-enrolled: " + inv.Name
 	}
 	d.alert(notify.Message{Event: "device.enrolled", Title: title, Priority: notify.High,
-		Body: fmt.Sprintf("%s%s enrolled from %s. If that wasn't you, remove it: %s", inv.Name, host, s.Source, d.removeHint(inv.Name))}, "")
+		Body: fmt.Sprintf("%s%s enrolled from %s.%s If that wasn't you, remove it: %s", inv.Name, host, s.Source, expiresNote(expires), d.removeHint(inv.Name))}, "")
 	if inv.TelegramMessage != 0 {
 		if b := d.currentBot(); b != nil {
 			go b.inviteUsed(inv.TelegramMessage, inv.Name, sanitize(r.Hostname))
@@ -515,12 +523,11 @@ func sanitize(s string) string {
 	return s
 }
 
-func forwardsString(f map[string]string) string {
+func forwardsString(fw []ForwardInfo) string {
 	var parts []string
-	for p, t := range f {
-		parts = append(parts, p+"->"+t)
+	for _, f := range fw {
+		parts = append(parts, f.String())
 	}
-	slices.Sort(parts)
 	return strings.Join(parts, ", ")
 }
 
@@ -531,6 +538,8 @@ type InviteResult struct {
 	Code    string    `json:"code"`
 	Name    string    `json:"name"`
 	Expires time.Time `json:"expires"`
+	// DeviceTTL: the device is removed this long after it enrolls (0: never).
+	DeviceTTL time.Duration `json:"device_ttl,omitempty"`
 }
 
 // InviteInfo is a listed open invite.
@@ -555,7 +564,16 @@ type StatusInfo struct {
 	// Update is a newer catflap release than the running one, if the daily
 	// update check found one.
 	Update string `json:"update,omitempty"`
+	// Features the running daemon supports, so a newer command can refuse
+	// options an older daemon would silently ignore.
+	Features []string `json:"features,omitempty"`
 }
+
+// Features of this version's daemon (see StatusInfo.Features).
+const (
+	FeatureForwardOnly  = "forward_only"  // forward add --only
+	FeatureDeviceExpiry = "device_expiry" // invite/approve --expires, catflap expire
+)
 
 func (d *Daemon) serveControl(ctx context.Context) error {
 	os.Remove(d.paths.Socket)
@@ -579,12 +597,13 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 			Name    string        `json:"name"`
 			TTL     time.Duration `json:"ttl"`
 			Replace bool          `json:"replace"`
+			Expires time.Duration `json:"expires"` // device lifetime after enrolling; 0: no limit
 		}
 		if json.NewDecoder(r.Body).Decode(&req) != nil {
 			ctlErr(w, http.StatusBadRequest, "bad request")
 			return
 		}
-		res, err := d.createInvite(r.Context(), req.Name, req.TTL, "", req.Replace)
+		res, err := d.createInvite(r.Context(), InviteOptions{Name: req.Name, TTL: req.TTL, Replace: req.Replace, DeviceTTL: req.Expires})
 		if err != nil {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -634,6 +653,21 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	mux.HandleFunc("GET /devices", func(w http.ResponseWriter, r *http.Request) {
 		ctlJSON(w, d.deviceInfos())
 	})
+	mux.HandleFunc("PUT /devices/{name}/expires", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			In time.Duration `json:"in"` // from now; 0: never
+		}
+		if json.NewDecoder(r.Body).Decode(&req) != nil || req.In < 0 {
+			ctlErr(w, http.StatusBadRequest, "bad request")
+			return
+		}
+		exp, err := d.setExpiry(r.PathValue("name"), req.In, "")
+		if err != nil {
+			ctlErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		ctlJSON(w, map[string]time.Time{"expires": exp})
+	})
 	mux.HandleFunc("DELETE /devices/{name}", func(w http.ResponseWriter, r *http.Request) {
 		res, err := d.removeDevice(r.Context(), r.PathValue("name"), "")
 		if err != nil {
@@ -645,7 +679,8 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		connected := len(d.refreshActivity())
 		d.mu.Lock()
-		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), Connected: connected, NeedsSync: d.st.NeedsSync, Started: d.started, Update: d.latest}
+		s := StatusInfo{Name: d.cfg.Name, Version: api.Version, Relay: d.cfg.Relay, Addr: string(d.addr), Devices: len(d.st.Devices), Connected: connected, NeedsSync: d.st.NeedsSync, Started: d.started, Update: d.latest,
+			Features: []string{FeatureForwardOnly, FeatureDeviceExpiry}}
 		for _, inv := range d.st.Invites {
 			if inv.Used == nil {
 				s.Invites++
@@ -654,7 +689,7 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 		d.mu.Unlock()
 		s.Forwards = []string{}
 		for _, f := range d.forwardList() {
-			s.Forwards = append(s.Forwards, fmt.Sprintf("%d->%s", f.Port, f.Target))
+			s.Forwards = append(s.Forwards, f.String())
 		}
 		ctlJSON(w, s)
 	})
@@ -663,14 +698,21 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	})
 	mux.HandleFunc("PUT /forwards/{port}", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Target string `json:"target"`
+			Target string   `json:"target"`
+			Only   []string `json:"only"` // devices the port is open to; empty: all
 		}
 		port, err := parsePort(r.PathValue("port"))
 		if err != nil || json.NewDecoder(r.Body).Decode(&req) != nil {
 			ctlErr(w, http.StatusBadRequest, "bad request")
 			return
 		}
-		changed, err := d.setForward(port, req.Target)
+		for _, n := range req.Only {
+			if !d.knownDevice(n) {
+				ctlErr(w, http.StatusBadRequest, fmt.Sprintf("no device or open invite named %q (see `catflap list`)", n))
+				return
+			}
+		}
+		changed, err := d.setForward(port, req.Target, req.Only)
 		if err != nil {
 			ctlErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -721,9 +763,20 @@ func (d *Daemon) serveControl(ctx context.Context) error {
 	return nil
 }
 
-// createInvite makes a one-time invite. origin is the channel the request
-// came from ("" = command line).
-func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duration, origin string, replace bool) (InviteResult, error) {
+// InviteOptions describe an invite to create.
+type InviteOptions struct {
+	Name    string
+	TTL     time.Duration // how long the invite is valid (default 15 minutes)
+	Replace bool          // re-enroll an existing device
+	// DeviceTTL makes the device temporary: removed this long after it
+	// enrolls. 0: no limit (a re-enrolled device keeps its expiry).
+	DeviceTTL time.Duration
+	Origin    string // the channel the request came from ("" = command line)
+}
+
+// createInvite makes a one-time invite.
+func (d *Daemon) createInvite(ctx context.Context, o InviteOptions) (InviteResult, error) {
+	name, ttl, replace, origin := o.Name, o.TTL, o.Replace, o.Origin
 	if !ValidName(name) {
 		return InviteResult{}, fmt.Errorf("invalid name %q: use lowercase letters, digits, '.', '-' or '_'", name)
 	}
@@ -732,6 +785,9 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 	}
 	if ttl > 90*24*time.Hour {
 		return InviteResult{}, errors.New("ttl is limited to 90 days")
+	}
+	if o.DeviceTTL < 0 || o.DeviceTTL > 0 && o.DeviceTTL < time.Minute {
+		return InviteResult{}, errors.New("expires: use at least a minute, e.g. 2h or 7d")
 	}
 	d.mu.Lock()
 	exists := slices.ContainsFunc(d.st.Devices, func(dev Device) bool { return dev.Name == name })
@@ -761,7 +817,7 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.st.Invites = append(d.st.Invites, Invite{ID: c.ID, Name: name, Secret: c.Secret, Created: time.Now(), Expires: exp, Replace: replace})
+	d.st.Invites = append(d.st.Invites, Invite{ID: c.ID, Name: name, Secret: c.Secret, Created: time.Now(), Expires: exp, Replace: replace, DeviceTTL: o.DeviceTTL})
 	if err := d.saveLocked(); err != nil {
 		return InviteResult{}, err
 	}
@@ -770,9 +826,13 @@ func (d *Daemon) createInvite(ctx context.Context, name string, ttl time.Duratio
 	if replace {
 		kind = "Re-enroll invite (replaces the existing device)"
 	}
+	temp := ""
+	if o.DeviceTTL > 0 {
+		temp = fmt.Sprintf(" The device is removed %s after it enrolls.", HumanDuration(o.DeviceTTL))
+	}
 	d.alert(notify.Message{Event: "invite.created", Title: "invite created for " + name,
-		Body: fmt.Sprintf("%s for %q created %s, valid until %s.", kind, name, via(origin), when(exp))}, origin)
-	return InviteResult{Code: c.String(), Name: name, Expires: exp}, nil
+		Body: fmt.Sprintf("%s for %q created %s, valid until %s.%s", kind, name, via(origin), when(exp), temp)}, origin)
+	return InviteResult{Code: c.String(), Name: name, Expires: exp, DeviceTTL: o.DeviceTTL}, nil
 }
 
 func (d *Daemon) revokeInvite(ctx context.Context, idOrName string) error {
@@ -816,6 +876,11 @@ type RemoveResult struct {
 // removeDevice closes all three gates for a device. origin is the channel
 // the request came from ("" = command line).
 func (d *Daemon) removeDevice(ctx context.Context, name string, origin string) (RemoveResult, error) {
+	return d.dropDevice(ctx, name, origin, false)
+}
+
+// dropDevice removes a device; expired: because its time was up.
+func (d *Daemon) dropDevice(ctx context.Context, name string, origin string, expired bool) (RemoveResult, error) {
 	var res RemoveResult
 	d.mu.Lock()
 	i := slices.IndexFunc(d.st.Devices, func(dev Device) bool { return dev.Name == name })
@@ -835,7 +900,9 @@ func (d *Daemon) removeDevice(ctx context.Context, name string, origin string) (
 	if err != nil {
 		return res, err
 	}
-	d.srv.DisconnectClient(k)
+	if d.srv != nil { // nil in tests
+		d.srv.DisconnectClient(k)
+	}
 	if path, ok := d.cfg.authorizedKeysPath(); ok {
 		removed, err := removeAuthorizedKey(path, name)
 		if err != nil {
@@ -844,9 +911,15 @@ func (d *Daemon) removeDevice(ctx context.Context, name string, origin string) (
 		res.SSHKeyRemoved = removed
 		res.SSHKeyKept = !removed && dev.SSHKey != "" && hasAuthorizedKey(path, dev.SSHKey)
 	}
-	d.logf("remove: device %q removed", name)
-	d.alert(notify.Message{Event: "device.removed", Title: "device removed: " + name,
-		Body: fmt.Sprintf("%s was removed %s and disconnected.", name, via(origin))}, origin)
+	if expired {
+		d.logf("remove: temporary device %q expired and was removed", name)
+		d.alert(notify.Message{Event: "device.expired", Title: "temporary device removed: " + name,
+			Body: fmt.Sprintf("%s was a temporary device (enrolled %s); its time ran out, so it was removed and disconnected.", name, dev.Added.Local().Format("2006-01-02 15:04"))}, origin)
+	} else {
+		d.logf("remove: device %q removed", name)
+		d.alert(notify.Message{Event: "device.removed", Title: "device removed: " + name,
+			Body: fmt.Sprintf("%s was removed %s and disconnected.", name, via(origin))}, origin)
+	}
 	if err := d.sync(ctx); err != nil {
 		d.logf("remove: relay sync failed, will retry: %v", err)
 		d.nudge()

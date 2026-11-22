@@ -257,7 +257,11 @@ func (d *Daemon) forgetRequest(id string) {
 }
 
 // approveRequest adds the requesting device and sends it the sealed reply.
-func (d *Daemon) approveRequest(ctx context.Context, key, origin string) (string, error) {
+// deviceTTL > 0 makes it a temporary device.
+func (d *Daemon) approveRequest(ctx context.Context, key, origin string, deviceTTL time.Duration) (string, error) {
+	if deviceTTL < 0 || deviceTTL > 0 && deviceTTL < time.Minute {
+		return "", fmt.Errorf("expires: use at least a minute, e.g. 2h or 7d")
+	}
 	p, err := d.findRequest(key)
 	if err != nil {
 		return "", err
@@ -274,7 +278,11 @@ func (d *Daemon) approveRequest(ctx context.Context, key, origin string) (string
 		}
 	}
 	d.mu.Lock()
-	d.st.Devices = append(d.st.Devices, Device{Name: name, NodeKey: p.nk.String(), SSHKey: p.sshKey, Hostname: p.hostname, Added: time.Now()})
+	var expires time.Time
+	if deviceTTL > 0 {
+		expires = time.Now().Add(deviceTTL).Truncate(time.Second)
+	}
+	d.st.Devices = append(d.st.Devices, Device{Name: name, NodeKey: p.nk.String(), SSHKey: p.sshKey, Hostname: p.hostname, Added: time.Now(), Expires: expires})
 	d.allow.Add(p.nk)
 	reply, _ := json.Marshal(api.SealedReply{Name: name, Homelab: d.cfg.Name, Addr: string(d.addr), SSHUser: d.cfg.SSHUser})
 	d.saveLocked()
@@ -303,7 +311,7 @@ func (d *Daemon) approveRequest(ctx context.Context, key, origin string) (string
 		go b.requestDecided(p.tgMsg, fmt.Sprintf("✓ Approved: <b>%s</b> is enrolled.", esc(name)))
 	}
 	d.alert(notify.Message{Event: "device.enrolled", Title: "new device: " + name, Priority: notify.High,
-		Body: fmt.Sprintf("%s (hostname %s) was approved %s and enrolled from %s. If that wasn't you, remove it: %s", name, p.hostname, via(origin), p.Source, d.removeHint(name))}, origin)
+		Body: fmt.Sprintf("%s (hostname %s) was approved %s and enrolled from %s.%s If that wasn't you, remove it: %s", name, p.hostname, via(origin), p.Source, expiresNote(expires), d.removeHint(name))}, origin)
 	return name, nil
 }
 
@@ -377,17 +385,20 @@ func (d *Daemon) requestRoutes(mux *http.ServeMux) {
 	for _, action := range []string{"approve", "deny"} {
 		mux.HandleFunc("POST /requests/"+action, func(w http.ResponseWriter, r *http.Request) {
 			var req struct {
-				Code string `json:"code"`
+				Code    string        `json:"code"`
+				Expires time.Duration `json:"expires"` // approve: temporary device
 			}
 			if json.NewDecoder(r.Body).Decode(&req) != nil || req.Code == "" {
 				ctlErr(w, http.StatusBadRequest, "bad request")
 				return
 			}
-			do := d.approveRequest
+			var name string
+			var err error
 			if action == "deny" {
-				do = d.denyRequest
+				name, err = d.denyRequest(r.Context(), req.Code, "")
+			} else {
+				name, err = d.approveRequest(r.Context(), req.Code, "", req.Expires)
 			}
-			name, err := do(r.Context(), req.Code, "")
 			if err != nil {
 				ctlErr(w, http.StatusBadRequest, err.Error())
 				return

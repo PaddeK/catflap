@@ -234,6 +234,40 @@ for _ in $(seq 100); do [ -S "$T/homelab/control.sock" ] && $H "$CF" forward lis
 OUT=$(printf 'x\n' | timeout 40 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 9999 2>>"$T/proxy.err" | head -1 | tr -d '\r' || true)
 check "forward survives a homelab restart ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake"
 check "client refuses reserved alias" bash -c "env CATFLAP_DIR=$T/c4 '$CF' enroll '$($H "$CF" invite c4 | grep -o 'cfi1-[^ ]*')' --alias list 2>&1 | grep -q reserved"
+check "ping -h shows the ping options" bash -c "'$CF' ping -h 2>&1 | grep -q -- '-count'"
+
+echo "== per-device ports"
+# (No new enrollments here: the relay allows 10 per address in 10 minutes,
+# and this test uses them all. "guest" is only invited, phone is enrolled.)
+$H "$CF" invite guest > /dev/null
+$H "$CF" forward add "9999=127.0.0.1:$SSHD_PORT" --only guest > "$T/only.log" 2>&1
+check "forward add --only (may name a device that is only invited)" grep -q 'reachable through the tunnel now, for guest' "$T/only.log"
+check "forward list shows who may use the port" bash -c "$H '$CF' forward list | grep '^9999 ' | grep -q guest && $H '$CF' forward list | grep '^22 ' | grep -q all"
+check "homelab.json gains forward_only" grep -q '"forward_only"' "$T/homelab/homelab.json"
+check "status shows the restriction" bash -c "$H '$CF' status | grep -q '9999->127.0.0.1:[0-9]* (only guest)'"
+check "--only refuses unknown devices" bash -c "$H '$CF' forward add 9999=127.0.0.1:$SSHD_PORT --only nosuch 2>&1 | grep -q 'no device or open invite named \"nosuch\"'"
+OUT=$(printf 'x\n' | timeout 10 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 9999 2>>"$T/proxy.err" | head -1 | tr -d '\r' || true)
+check "a device not on the list is refused" bash -c "[[ '$OUT' != SSH-* ]]"
+check "the homelab logs the refusal" grep -q 'phone -> port 9999 refused' "$T/homelab.log"
+check "port 22 stays open to every device" bash -c "printf 'ok\n' | timeout 30 env CATFLAP_DIR='$T/c2' '$CF' proxy testlab 22 2>>'$T/proxy.err' | head -1 | grep -q SSH-"
+$H "$CF" forward add "9999=127.0.0.1:$SSHD_PORT" --only phone,guest > /dev/null
+OUT=$(printf 'x\n' | timeout 30 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 9999 2>>"$T/proxy.err" | head -1 | tr -d '\r' || true)
+check "a device on the list gets in ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake"
+# Taking phone off the list cuts its open connection.
+env CATFLAP_DIR="$T/c2" "$CF" forward testlab 18998:9999 > "$T/c2fwd2.log" 2>&1 &
+TFWD=$!
+PIDS+=("$TFWD")
+for _ in $(seq 100); do grep -q 'Tunnel ok' "$T/c2fwd2.log" && break; sleep 0.2; done
+firstline 18998 hold > "$T/thold.out" 2>&1 &
+HOLD=$!
+for _ in $(seq 50); do [ -s "$T/thold.out" ] && break; sleep 0.2; done
+$H "$CF" forward add "9999=127.0.0.1:$SSHD_PORT" --only guest > /dev/null
+wait $HOLD || true
+check "taking access away cuts the open connection" bash -c "head -1 '$T/thold.out' | grep -q SSH- && grep -qx EOF '$T/thold.out'"
+kill $TFWD 2>/dev/null || true; wait $TFWD 2>/dev/null || true
+$H "$CF" forward add "9999=127.0.0.1:$SSHD_PORT" > "$T/only2.log" 2>&1
+check "forward add without --only opens it to all again" bash -c "grep -q 'for every device' '$T/only2.log' && ! grep -q forward_only '$T/homelab/homelab.json'"
+$H "$CF" invites --revoke guest > /dev/null
 
 echo "== notifications and the Telegram bot (fake services)"
 python3 -I tests/fakeservices.py serve "$T/fake.port" > "$T/fake.log" 2>&1 &
@@ -331,6 +365,21 @@ wait $C10 || true
 check "Approve in Telegram: the device is enrolled" grep -q 'Approved: this device is "req3"' "$T/c10.log"
 check "a taken name is refused" bash -c "env CATFLAP_DIR='$T/c11' CATFLAP_SSH_CONFIG='$T/c11/ssh_config' timeout 60 '$CF' enroll --request $RQ --name req1 --no-ssh-key 2>&1 | grep -q 'is taken'"
 
+# A temporary device: removed a minute after approval (checked further down).
+mkdir -p "$T/ct"; ssh-keygen -q -t ed25519 -N "" -C ct -f "$T/ct/id"
+env CATFLAP_DIR="$T/ct" CATFLAP_SSH_CONFIG="$T/ct/ssh_config" "$CF" enroll --request "$RQ" --name tmpdev --ssh-key "$T/ct/id.pub" > "$T/ct.log" 2>&1 &
+CT=$!
+TCODE=$(waitcode "$T/ct.log")
+$H "$CF" approve "$TCODE" --expires 1m > "$T/tapprove.log" 2>&1
+wait $CT || true
+check "approve --expires: a temporary device" bash -c "grep -q 'removed automatically in 1 minute' '$T/tapprove.log' && grep -q 'Approved: this device is \"tmpdev\"' '$T/ct.log'"
+check "alert: it is a temporary device" fake has ntfy "It is a temporary device"
+check "list: EXPIRES column with tmpdev's time, - for the others" bash -c "$H '$CF' list > '$T/tlist.out' && grep -q EXPIRES '$T/tlist.out' && grep '^tmpdev ' '$T/tlist.out' | grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' && grep '^phone ' '$T/tlist.out' | grep -q ' - '"
+check "invite --expires: the device will be temporary" bash -c "$H '$CF' invite later --expires 7d | grep -q 'removed 7 days after it enrolls' && $H '$CF' invites --revoke later > /dev/null"
+check "expire: a device can be made temporary" bash -c "$H '$CF' expire phone 30d | grep -q 'is removed automatically at'"
+check "expire never: and permanent again" bash -c "$H '$CF' expire phone never | grep -q 'no longer expires' && $H '$CF' list | grep '^phone ' | grep -q ' - '"
+check "expire: unknown device" bash -c "$H '$CF' expire nosuch 1d 2>&1 | grep -q 'no device named \"nosuch\"'"
+
 fake update 4242 "/requests off"
 check "/requests off in Telegram closes the window" fake has tg "Enrollment requests are closed"
 check "requests are refused again" bash -c "env CATFLAP_DIR='$T/c11' CATFLAP_SSH_CONFIG='$T/c11/ssh_config' '$CF' enroll --request $RQ --name late --no-ssh-key 2>&1 | grep -q 'accepts enrollment requests right now'"
@@ -413,6 +462,15 @@ client c6 enroll "$RI" --no-ssh-key > "$T/c6r.log" 2>&1 || true
 check "invite --replace re-enrolls an existing device" bash -c "grep -q Approved '$T/c6r.log' && [ \$($H '$CF' list | grep -c '^multi ') = 1 ]"
 OUT=$(printf 'again\n' | timeout 30 env CATFLAP_DIR="$T/c6" "$CF" proxy testlab 22 2>>"$T/proxy.err" | head -2 | tr -d '\r' | tr '\n' '|')
 check "the re-enrolled device works ($OUT)" test "$OUT" = "SSH-2.0-catflap-e2e-fake|again|"
+
+echo "== the temporary device expires"
+for _ in $(seq 120); do $H "$CF" list | grep -q '^tmpdev ' || break; sleep 1; done
+check "the temporary device is removed when its time is up" bash -c "! $H '$CF' list | grep -q '^tmpdev '"
+check "... with its SSH key" bash -c "! grep -q 'catflap:tmpdev' '$T/homelab/authorized_keys'"
+check "... and the relay forgets it" bash -c "! '$CF' relay status --config '$T/relay/relay.json' | grep -q 'device tmpdev'"
+OUT=$(printf 'x\n' | timeout 10 env CATFLAP_DIR="$T/ct" "$CF" proxy testlab 22 2>/dev/null | head -1 | tr -d '\r' || true)
+check "... and it is cut off" bash -c "[[ '$OUT' != SSH-* ]]"
+check "alert: the temporary device was removed" fake has ntfy "temporary device removed: tmpdev"
 
 echo "== relay remove, setup --force, uninstall"
 RC="--config $T/relay/relay.json"

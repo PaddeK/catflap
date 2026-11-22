@@ -41,7 +41,8 @@ func buildTree() *spec {
 	devices := &spec{args: first(deviceNames)}
 	forward := &spec{
 		sub: map[string]*spec{
-			"add":    {},
+			"add": {flags: []string{"--only="},
+				values: map[string]func(context.Context) []string{"--only": deviceNames}},
 			"remove": {args: first(forwardPorts)},
 			"list":   {},
 		},
@@ -68,7 +69,7 @@ func buildTree() *spec {
 			"homelab": {flags: []string{"--join=", "--name=", "--force", "--no-service", "--forward="}},
 		}},
 		"enroll": {flags: []string{"--alias=", "--ssh-key=", "--no-ssh-key", "--no-ssh-config", "--request=", "--name="}},
-		"invite": {flags: []string{"--ttl=", "--replace"},
+		"invite": {flags: []string{"--ttl=", "--replace", "--expires="},
 			args: func(ctx context.Context, n int, done []string) []string {
 				if n == 0 && slices.ContainsFunc(done, isFlag("replace")) {
 					return deviceNames(ctx)
@@ -85,7 +86,16 @@ func buildTree() *spec {
 				}
 				return nil
 			}},
-		"approve": {args: first(pendingNames)},
+		"approve": {flags: []string{"--expires="}, args: first(pendingNames)},
+		"expire": {args: func(ctx context.Context, n int, _ []string) []string {
+			switch n {
+			case 0:
+				return deviceNames(ctx)
+			case 1:
+				return []string{"1d", "7d", "30d", "never"}
+			}
+			return nil
+		}},
 		"deny":    {args: first(pendingNames)},
 		"remove":  devices,
 		"forward": forward,
