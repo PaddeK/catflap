@@ -58,7 +58,7 @@ re-enrolled with `--replace` keeps its expiry time unless the invite sets a new 
 see [the Telegram bot](#the-telegram-invite-bot)). See also [Security](security.md#if-something-is-lost).
 
 **Device names** are up to 63 lowercase letters, digits, `.`, `-` and `_`, starting with a
-letter or digit.
+letter or digit. `any` is taken: `catflap forward list` uses it for ports open to every device.
 
 **Long-lived invites** (e.g. `--ttl 30d`, to enroll a device in an emergency) belong in a
 password manager: whoever has one can enroll a device until it's used.
@@ -100,10 +100,11 @@ on your network, because anyone reaching it would use your device's access.
 | use another local port (*client*) | `catflap forward homelab 8000:1880` → `http://localhost:8000` |
 
 By default every enrolled device can reach every forwarded port; connections to other ports are
-refused. With `--only`, the port is open to the devices you list and no other: their
-connections are closed right away, and the homelab logs them. `catflap forward list` shows who
-may use each port. `catflap forward add` always sets the whole forward, so run it again with the
-new list to change it; a device that loses access is disconnected from that port at once.
+refused. With `--only`, the port is open to the devices you list and no other: connections from
+others are closed right away, and the homelab logs them. `catflap forward list` shows who may
+use each port (`any`: every device). `catflap forward add` always sets the whole forward, so run
+it again with the new list to change it; a device that loses access is disconnected from that
+port at once.
 
 `--only` goes by device name. You can name a device that only has an open invite so far, and a
 device re-enrolled with `--replace` keeps its access. If you remove a device and later enroll

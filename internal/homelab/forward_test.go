@@ -71,6 +71,9 @@ func TestLoadConfigForwardOnly(t *testing.T) {
 		_, err := LoadConfig(p)
 		return err
 	}
+	if err := DeviceNameError("any"); err == nil {
+		t.Fatal(`"any" accepted as a device name`)
+	}
 	if err := load(`{"relay":"r","forwards":{"22":"127.0.0.1:22","1880":"127.0.0.1:1880"},"forward_only":{"1880":["phone"]}}`); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +81,7 @@ func TestLoadConfigForwardOnly(t *testing.T) {
 		`{"relay":"r","forwards":{"22":"127.0.0.1:22"},"forward_only":{"1880":["phone"]}}`:  "not forwarded",
 		`{"relay":"r","forwards":{"22":"127.0.0.1:22"},"forward_only":{"22":[]}}`:           "has no devices",
 		`{"relay":"r","forwards":{"22":"127.0.0.1:22"},"forward_only":{"22":["Bad Name"]}}`: "bad device name",
+		`{"relay":"r","forwards":{"22":"127.0.0.1:22"},"forward_only":{"22":["any"]}}`:      "bad device name",
 	} {
 		if err := load(js); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want %q", js, err, want)

@@ -847,7 +847,7 @@ func cmdForwardAdmin(ctx context.Context, sub string, args []string) error {
 	case "add":
 		fs := newFlags("forward add")
 		var only listFlag
-		fs.Var(&only, "only", "open the port only to these devices, as `dev1,dev2` (default: all devices)")
+		fs.Var(&only, "only", "open the port only to these devices, as `dev1,dev2` (default: any device)")
 		pos, err := parse(fs, args)
 		if err != nil {
 			return err
@@ -910,7 +910,7 @@ func cmdForwardAdmin(ctx context.Context, sub string, args []string) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "PORT\tTARGET\tDEVICES")
 	for _, f := range fw {
-		who := "all"
+		who := homelab.AnyDevice
 		if len(f.Only) > 0 {
 			who = strings.Join(f.Only, ", ")
 		}
@@ -1063,48 +1063,95 @@ func fmtLatency(d time.Duration) string {
 // ---- status / version ----
 
 func cmdStatus(ctx context.Context) error {
-	found := false
+	return printStatus(ctx, os.Stdout)
+}
+
+// printStatus shows each role set up on this machine as a block: a few
+// "key  value" lines, then a table where there is one (ports, homelabs).
+func printStatus(ctx context.Context, out io.Writer) error {
+	sections := 0
+	section := func(title string) *tabwriter.Writer {
+		if sections > 0 {
+			fmt.Fprintln(out)
+		}
+		sections++
+		fmt.Fprintln(out, title)
+		return tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	}
 	if cfg, err := relay.LoadConfig(relay.DefaultConfigPath); err == nil {
-		found = true
-		fmt.Printf("relay:   %s (config %s; details: sudo catflap relay status)\n", cfg.PublicAddr(), relay.DefaultConfigPath)
+		tw := section("Relay")
+		fmt.Fprintf(tw, "  address\t%s\n", cfg.PublicAddr())
+		fmt.Fprintf(tw, "  config\t%s\n", relay.DefaultConfigPath)
+		fmt.Fprintf(tw, "  details\tsudo catflap relay status\n")
+		tw.Flush()
 	}
 	if p, err := homelab.DefaultPaths(); err == nil {
 		if cfg, err := homelab.LoadConfig(p); err == nil {
-			found = true
-			var s homelab.StatusInfo
-			if err := homelab.Control(p).Do(ctx, "GET", "/status", nil, &s); err != nil {
-				why := err.Error()
-				if notRunning(err) {
-					why = startHint()
-				}
-				fmt.Printf("homelab: %q via %s - NOT RUNNING (%s)\n", cfg.Name, cfg.Relay, why)
-			} else {
-				ver := s.Version
-				if ver == "" {
-					ver = "(an older version)"
-				}
-				sync := ""
-				if s.NeedsSync {
-					sync = ", relay sync pending"
-				}
-				fmt.Printf("homelab: %q via %s - running catflap %s, %d device(s) (%d connected), %d open invite(s), forwarding %s%s\n", s.Name, s.Relay, ver, s.Devices, s.Connected, s.Invites, strings.Join(s.Forwards, ", "), sync)
-				if s.Update != "" {
-					fmt.Printf("         update available: catflap %s (how to upgrade: %s)\n", s.Update, update.UpgradeDocURL)
-				}
-			}
+			printHomelabStatus(ctx, section(fmt.Sprintf("Homelab %q", cfg.Name)), out, p, cfg)
 		}
 	}
 	if st, _, err := client.Load(); err == nil && len(st.Servers) > 0 {
-		found = true
+		tw := section("Client")
+		fmt.Fprintln(tw, "  ALIAS\tHOMELAB\tRELAY\tTHIS DEVICE")
 		for _, a := range st.Aliases() {
 			s := st.Servers[a]
-			fmt.Printf("client:  %s -> homelab %q via %s (this device is %q; ssh %s)\n", a, s.Homelab, s.Relay, s.DeviceName, a)
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", a, s.Homelab, s.Relay, s.DeviceName)
 		}
+		tw.Flush()
+		fmt.Fprintln(out, "  connect with: ssh ALIAS")
 	}
-	if !found {
-		fmt.Println("nothing set up on this machine yet (see `catflap help`)")
+	if sections == 0 {
+		fmt.Fprintln(out, "nothing set up on this machine yet (see `catflap help`)")
 	}
 	return nil
+}
+
+func printHomelabStatus(ctx context.Context, tw *tabwriter.Writer, out io.Writer, p homelab.Paths, cfg homelab.Config) {
+	c := homelab.Control(p)
+	var s homelab.StatusInfo
+	if err := c.Do(ctx, "GET", "/status", nil, &s); err != nil {
+		why := err.Error()
+		if notRunning(err) {
+			why = startHint()
+		}
+		fmt.Fprintf(tw, "  status\tNOT RUNNING (%s)\n", why)
+		fmt.Fprintf(tw, "  relay\t%s\n", cfg.Relay)
+		tw.Flush()
+		return
+	}
+	ver := s.Version
+	if ver == "" {
+		ver = "(an older version)"
+	}
+	sync := "in sync"
+	if s.NeedsSync {
+		sync = "sync pending: relay unreachable?"
+	}
+	fmt.Fprintf(tw, "  status\trunning catflap %s since %s\n", ver, s.Started.Local().Format("2006-01-02 15:04"))
+	fmt.Fprintf(tw, "  relay\t%s (%s)\n", s.Relay, sync)
+	fmt.Fprintf(tw, "  devices\t%d, %d connected now\n", s.Devices, s.Connected)
+	fmt.Fprintf(tw, "  invites\t%d open\n", s.Invites)
+	if s.Update != "" {
+		fmt.Fprintf(tw, "  update\tcatflap %s is out; how to upgrade: %s\n", s.Update, update.UpgradeDocURL)
+	}
+	var fw []homelab.ForwardInfo
+	if err := c.Do(ctx, "GET", "/forwards", nil, &fw); err != nil || len(fw) == 0 {
+		fmt.Fprintln(tw, "  ports\tnone forwarded")
+		tw.Flush()
+		return
+	}
+	tw.Flush()
+	fmt.Fprintln(out)
+	tw = tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "  PORT\tTARGET\tDEVICES")
+	for _, f := range fw {
+		who := homelab.AnyDevice
+		if len(f.Only) > 0 {
+			who = strings.Join(f.Only, ", ")
+		}
+		fmt.Fprintf(tw, "  %d\t%s\t%s\n", f.Port, f.Target, who)
+	}
+	tw.Flush()
 }
 
 // cmdHomelabMove moves the homelab to another relay (new hostname or port).

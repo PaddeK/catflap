@@ -239,8 +239,8 @@ func (d *Daemon) setForward(port int, target string, only []string) (changed boo
 	}
 	only = normalizeOnly(only)
 	for _, n := range only {
-		if !ValidName(n) {
-			return false, fmt.Errorf("invalid device name %q", n)
+		if err := DeviceNameError(n); err != nil {
+			return false, err
 		}
 	}
 	d.fwdMu.Lock()

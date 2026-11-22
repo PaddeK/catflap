@@ -159,8 +159,8 @@ func (d *Daemon) requestNew(ctx context.Context, ev api.RequestEvent) {
 	case r.Homelab != d.cfg.Name:
 		deny("wrong homelab")
 		return
-	case !ValidName(r.Name):
-		deny(fmt.Sprintf("invalid device name %q: use lowercase letters, digits, '.', '-' or '_' (--name)", r.Name))
+	case DeviceNameError(r.Name) != nil:
+		deny(DeviceNameError(r.Name).Error() + "; ask again with another --name")
 		return
 	case d.nameTaken(r.Name, ev.ID):
 		deny(fmt.Sprintf("the name %q is taken on this homelab; ask again with another --name", r.Name))

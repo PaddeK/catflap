@@ -188,7 +188,7 @@ func LoadConfig(p Paths) (Config, error) {
 			return c, fmt.Errorf("homelab config: forward_only: port %s has no devices (remove the entry to open it to all devices)", p)
 		}
 		for _, n := range names {
-			if !ValidName(n) {
+			if DeviceNameError(n) != nil {
 				return c, fmt.Errorf("homelab config: forward_only: bad device name %q", n)
 			}
 		}
@@ -274,3 +274,18 @@ var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
 // ValidName reports whether s is a valid device or homelab name.
 func ValidName(s string) bool { return nameRE.MatchString(s) }
+
+// AnyDevice is shown for a port open to every device (`forward list`), so
+// it can't be a device name.
+const AnyDevice = "any"
+
+// DeviceNameError explains why s can't be a device name, or returns nil.
+func DeviceNameError(s string) error {
+	switch {
+	case s == AnyDevice:
+		return fmt.Errorf("%q can't be a device name (`catflap forward list` uses it for ports open to every device)", s)
+	case !ValidName(s):
+		return fmt.Errorf("invalid device name %q: use lowercase letters, digits, '.', '-' or '_'", s)
+	}
+	return nil
+}

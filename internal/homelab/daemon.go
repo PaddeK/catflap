@@ -777,8 +777,8 @@ type InviteOptions struct {
 // createInvite makes a one-time invite.
 func (d *Daemon) createInvite(ctx context.Context, o InviteOptions) (InviteResult, error) {
 	name, ttl, replace, origin := o.Name, o.TTL, o.Replace, o.Origin
-	if !ValidName(name) {
-		return InviteResult{}, fmt.Errorf("invalid name %q: use lowercase letters, digits, '.', '-' or '_'", name)
+	if err := DeviceNameError(name); err != nil {
+		return InviteResult{}, err
 	}
 	if ttl <= 0 {
 		ttl = 15 * time.Minute

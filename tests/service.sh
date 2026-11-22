@@ -124,7 +124,7 @@ tunnel() { # one round trip through the homelab's tunnel
 	out=$(printf '%s\n' "$1" | tmo 30 env CATFLAP_DIR="$(nat "$T/dev")" "$CF" proxy svclab 22 2>> "$T/proxy.log" | head -2 | tr -d '\r' | tr '\n' '|')
 	[ "$out" = "SSH-2.0-catflap-service-fake|$1|" ]
 }
-started() { "$CF" status 2> /dev/null | grep -o 'running catflap [^,]*'; }
+started() { "$CF" status 2> /dev/null | grep -o 'running catflap [^ ]*'; }
 service_loaded() {
 	if [ $OS = mac ]; then launchctl print "gui/$(id -u)/catflap.homelab" > /dev/null 2>&1; else MSYS_NO_PATHCONV=1 schtasks /Query /TN catflap-homelab > /dev/null 2>&1; fi
 }
@@ -146,7 +146,7 @@ else
 	check "task runs elevated for an admin account" bash -c "tr -d '\0' < '$T/task.xml' | grep -q '<RunLevel>HighestAvailable</RunLevel>'"
 	check "the output names the admin keys file" grep -q 'administrators_authorized_keys' "$T/setup.log"
 fi
-check "catflap status: running" bash -c "'$CF' status | grep -q 'homelab: \"svclab\" .* running catflap'"
+check "catflap status: running" bash -c "'$CF' status > '$T/status.out' && grep -q '^Homelab \"svclab\"' '$T/status.out' && grep -q 'running catflap' '$T/status.out'"
 check "the service logs to a file" grep -q 'homelab "svclab" up' "$HL_LOG"
 
 echo "== a device through the service's tunnel"
@@ -178,7 +178,7 @@ echo "== move to another relay (stop, switch, start)"
 JOIN2=$(relay relay2 18444 13479)
 "$CF" homelab move --join "$JOIN2" --yes > "$T/move.log" 2>&1 || true
 check "move: now on the new relay" grep -q 'now uses relay 127.0.0.1:18444' "$T/move.log"
-check "move: the service runs again" bash -c "'$CF' status | grep -q 'via 127.0.0.1:18444 - running'"
+check "move: the service runs again" bash -c "'$CF' status > '$T/status.out' && grep -qE '^  relay +127.0.0.1:18444 ' '$T/status.out' && grep -q 'running catflap' '$T/status.out'"
 INV2=$(grep -o 'cfi1-[^ ]*' "$T/move.log" | head -1)
 client enroll "$INV2" > "$T/reenroll.log" 2>&1 || true
 check "re-enrolled through the new relay" tunnel hiss
@@ -187,7 +187,7 @@ echo "== uninstall"
 "$CF" uninstall homelab --yes > "$T/uninstall.log" 2>&1 || true
 check "uninstall: done" grep -q '^done' "$T/uninstall.log"
 check "the service is gone" not service_loaded
-check "the homelab stopped" bash -c "! '$CF' status | grep -q 'homelab:'"
+check "the homelab stopped" bash -c "! '$CF' status | grep -q '^Homelab'"
 check "catflap's SSH key removed" bash -c "! grep -q 'catflap:dev1' '$KEYS'"
 check "the service log deleted" test ! -e "$HL_LOG"
 if [ $OS = mac ]; then

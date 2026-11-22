@@ -125,7 +125,7 @@ check "CATFLAP_NO_AGENT fallback works" bash -c "printf 'x\n' | CATFLAP_NO_AGENT
 
 echo "== activity and ping"
 check "list: the device is connected now" bash -c "$H '$CF' list | grep '^laptop ' | grep -qE 'now \((direct|relay)\)'"
-check "status counts connected devices" bash -c "$H '$CF' status | grep -q '(1 connected)'"
+check "status counts connected devices" bash -c "$H '$CF' status | grep -qE '^  devices +[0-9]+, 1 connected now'"
 client c1 ping testlab --count 3 > "$T/ping.log" 2>&1 || true
 check "ping: three replies with latency and path" bash -c "grep -q '3 of 3 pings answered' '$T/ping.log' && [ \$(grep -cE '^reply from testlab: [0-9.]+ ms, (direct|through the relay)' '$T/ping.log') = 3 ]"
 check "ping goes through the agent" bash -c "[ \$(grep -c 'agent: listening' '$T/c1/agent.log') = 1 ]"
@@ -242,9 +242,9 @@ echo "== per-device ports"
 $H "$CF" invite guest > /dev/null
 $H "$CF" forward add "9999=127.0.0.1:$SSHD_PORT" --only guest > "$T/only.log" 2>&1
 check "forward add --only (may name a device that is only invited)" grep -q 'reachable through the tunnel now, for guest' "$T/only.log"
-check "forward list shows who may use the port" bash -c "$H '$CF' forward list | grep '^9999 ' | grep -q guest && $H '$CF' forward list | grep '^22 ' | grep -q all"
+check "forward list shows who may use the port" bash -c "$H '$CF' forward list | grep '^9999 ' | grep -q guest && $H '$CF' forward list | grep '^22 ' | grep -q any && $H '$CF' invite any 2>&1 | grep -q \"can't be a device name\""
 check "homelab.json gains forward_only" grep -q '"forward_only"' "$T/homelab/homelab.json"
-check "status shows the restriction" bash -c "$H '$CF' status | grep -q '9999->127.0.0.1:[0-9]* (only guest)'"
+check "status shows the restriction" bash -c "$H '$CF' status | grep -qE '^  9999 +127.0.0.1:[0-9]+ +guest$'"
 check "--only refuses unknown devices" bash -c "$H '$CF' forward add 9999=127.0.0.1:$SSHD_PORT --only nosuch 2>&1 | grep -q 'no device or open invite named \"nosuch\"'"
 OUT=$(printf 'x\n' | timeout 10 env CATFLAP_DIR="$T/c2" "$CF" proxy testlab 9999 2>>"$T/proxy.err" | head -1 | tr -d '\r' || true)
 check "a device not on the list is refused" bash -c "[[ '$OUT' != SSH-* ]]"

@@ -12,8 +12,11 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
   `catflap list` shows when temporary devices expire.
 - Ports for some devices only: `catflap forward add 1880 --only laptop,phone`. Other devices'
   connections to that port are closed right away; `catflap forward list` shows who may use each
-  port. The setting is stored in the homelab settings file as `forward_only`; an older catflap
-  version ignores it, so after a downgrade those ports are open to every device again.
+  port (`any` for ports open to every device, so `any` can't be a device name anymore). The
+  setting is stored in the homelab settings file as `forward_only`; an older catflap version
+  ignores it, so after a downgrade those ports are open to every device again.
+- `catflap status` shows each role as a short block with a table of the forwarded ports
+  (homelab) and of the homelabs (client), instead of one long line.
 - Fixed: `catflap ping -h` showed the general help instead of the ping options.
 
 ## v0.6.0 (2026-11-21)
