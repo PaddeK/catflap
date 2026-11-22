@@ -6,6 +6,8 @@ the [releases page](https://github.com/PaddeK/catflap/releases). To upgrade, see
 
 ## Unreleased
 
+## v0.7.0 (2026-11-22)
+
 - Temporary devices: `catflap invite NAME --expires 7d` removes the device automatically 7 days
   after it enrolls, with an alert. `catflap expire NAME 3d|never` changes that for any device;
   `catflap approve CODE --expires 1d` and `/invite NAME 7d` in the Telegram bot work too.
